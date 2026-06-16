@@ -1,0 +1,172 @@
+"""Export a trained checkpoint into a Kaggle submission tarball.
+
+Two backends:
+  --backend torch  (default): bundles policy.py + the raw checkpoint (model.pt)
+      and runs torch inference. Smaller/simpler, BUT requires the Kaggle cabt
+      runtime to have torch installed.
+  --backend numpy: bundles model.npz + numpy_policy.py and runs a pure-numpy
+      forward pass. Torch-free, runs anywhere numpy exists. Use if torch is
+      unavailable on the runtime.
+
+Archive top-level contents (flat, as Kaggle requires):
+    main.py  deck.csv  EN_Card_Data.csv  card_features.py  encoding.py
+    + (torch) policy.py  model.pt      OR      + (numpy) numpy_policy.py  model.npz
+
+    python scripts/export_rl_submission.py --ckpt path/to/latest.pt            # torch
+    python scripts/export_rl_submission.py --ckpt path/to/latest.pt --backend numpy
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import tarfile
+
+import numpy as np
+import torch
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RL = os.path.join(ROOT, "rl")
+
+# Kaggle execs main.py with no __file__ but adds the agent dir to sys.path.
+_DIR_FINDER = '''\
+import os
+import sys
+
+
+def _agent_dir():
+    candidates = list(sys.path) + ["/kaggle_simulations/agent", os.getcwd()]
+    for d in candidates:
+        if d and os.path.exists(os.path.join(d, "deck.csv")):
+            return d
+    return os.getcwd()
+
+
+_HERE = _agent_dir()
+sys.path.insert(0, _HERE)
+'''
+
+_AGENT_FN = '''\
+
+with open(os.path.join(_HERE, "deck.csv")) as f:
+    DECK = [int(line) for line in f if line.strip()]
+
+CARDS = get_card_table(os.path.join(_HERE, "EN_Card_Data.csv"))
+ENC = Encoder(CARDS)
+
+
+def agent(obs):
+    sel = obs.get("select")
+    if sel is None:                       # engine asking for the deck
+        return DECK
+    picked = []
+    max_count = sel.get("maxCount", 1)
+    for _ in range(max_count + 1):        # buffer single picks into a full selection
+        o = ENC.encode(obs, set(picked))
+        a = SELECT(o)
+        if a == SUBMIT_ACTION:
+            break
+        picked.append(a)
+        if len(picked) >= max_count:
+            break
+    return sorted(set(picked))
+'''
+
+TORCH_HEAD = '''\
+import torch
+from card_features import get_card_table
+from encoding import Encoder, SUBMIT_ACTION
+from policy import ActorCritic, greedy_action
+
+_DEVICE = torch.device("cpu")
+_CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
+_NET = ActorCritic(Encoder(get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))).cf,
+                   get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv")).vocab_size,
+                   **_CK.get("net_config", {}))
+_NET.load_state_dict(_CK["net"])
+_NET.eval()
+
+
+def SELECT(o):
+    return greedy_action(_NET, o, _DEVICE)
+'''
+
+NUMPY_HEAD = '''\
+from card_features import get_card_table
+from encoding import Encoder, SUBMIT_ACTION
+from numpy_policy import NumpyPolicy
+
+_POLICY = NumpyPolicy(os.path.join(_agent_dir(), "model.npz"))
+
+
+def SELECT(o):
+    return _POLICY.select(o)
+'''
+
+
+def copy_module(src_name, dst_path):
+    """Copy an rl/ module to the flat bundle, fixing relative imports."""
+    with open(os.path.join(RL, src_name), encoding="utf-8") as f:
+        code = f.read()
+    code = code.replace("from .card_features import", "from card_features import")
+    code = code.replace("from .encoding import", "from encoding import")
+    with open(dst_path, "w", encoding="utf-8") as f:
+        f.write(code)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--ckpt", required=True)
+    p.add_argument("--backend", choices=["torch", "numpy"], default="torch")
+    p.add_argument("--deck", default=os.path.join(ROOT, "agent", "deck.csv"))
+    p.add_argument("--csv", default=os.path.join(ROOT, "EN_Card_Data.csv"))
+    p.add_argument("--out", default=None)
+    p.add_argument("--builddir", default=None)
+    args = p.parse_args()
+
+    out = args.out or os.path.join(ROOT, f"submission_rl_{args.backend}.tar.gz")
+    b = args.builddir or os.path.join(ROOT, f"submission_rl_{args.backend}")
+    if os.path.exists(b):
+        shutil.rmtree(b)
+    os.makedirs(b)
+
+    ck = torch.load(args.ckpt, map_location="cpu")
+
+    # shared code + data
+    copy_module("card_features.py", os.path.join(b, "card_features.py"))
+    copy_module("encoding.py", os.path.join(b, "encoding.py"))
+    shutil.copy(args.deck, os.path.join(b, "deck.csv"))
+    shutil.copy(args.csv, os.path.join(b, "EN_Card_Data.csv"))
+
+    if args.backend == "torch":
+        copy_module("policy.py", os.path.join(b, "policy.py"))
+        torch.save(ck, os.path.join(b, "model.pt"))
+        main_py = _DIR_FINDER + TORCH_HEAD + _AGENT_FN
+    else:
+        copy_module("numpy_policy.py", os.path.join(b, "numpy_policy.py"))
+        np.savez(os.path.join(b, "model.npz"),
+                 **{k: v.cpu().numpy() for k, v in ck["net"].items()})
+        main_py = _DIR_FINDER + NUMPY_HEAD + _AGENT_FN
+
+    with open(os.path.join(b, "main.py"), "w", encoding="utf-8") as f:
+        f.write(main_py)
+
+    with open(os.path.join(b, "deck.csv")) as f:
+        n = len([ln for ln in f if ln.strip()])
+    if n != 60:
+        raise SystemExit(f"ERROR: deck.csv has {n} cards, expected 60.")
+
+    files = sorted(os.listdir(b))
+    with tarfile.open(out, "w:gz") as tar:
+        for name in files:
+            tar.add(os.path.join(b, name), arcname=name)
+
+    size = os.path.getsize(out) / 1e6
+    print(f"backend={args.backend}  trained to step {ck.get('global_step')}")
+    print(f"wrote {out} ({size:.1f} MB)")
+    print("top-level contents:", files)
+
+
+if __name__ == "__main__":
+    main()

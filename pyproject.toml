@@ -1,0 +1,23 @@
+[project]
+name = "pkmn"
+version = "0.1.0"
+description = "RL agent for the PTCG AI Battle Challenge (cabt engine)"
+requires-python = ">=3.12"
+# NOTE: torch and kaggle-environments are installed SEPARATELY (see README /
+# HPC.md): torch from the CUDA wheel index, kaggle-environments via
+# `--no-deps` from GitHub. numpy is pinned <2.0 because the Eden login node
+# lacks the x86-64-v2 baseline that numpy 2.1+ wheels require.
+dependencies = [
+    "numpy>=1.26,<2.0",
+]
+
+[project.optional-dependencies]
+# Convenience extra; on the cluster prefer the CUDA torch wheel per HPC.md.
+train = ["torch", "tensorboard"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rl"]

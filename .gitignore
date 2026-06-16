@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Submission artifacts
+submission.tar.gz
+*.tar.gz
+submission_rl*/
+submission_selfplay/
+
+# Model checkpoints / training runs (regenerable; large)
+*.pt
+*.npz
+pkmn_runs/
+
+# Local run output
+result.html
+*.html
+.probe/
+.smoke*/
+
+# Crash dumps
+*.stackdump
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Kaggle credentials
+kaggle.json

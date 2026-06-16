@@ -1,0 +1,22 @@
+# The cabt Pokemon TCG battle engine ships inside kaggle-environments.
+# The "cabt" env is only present on recent (master) builds, not the PyPI
+# release, so install from GitHub. --no-deps avoids the heavy ML extras
+# (gymnax/flax/orbax) that other envs pull in and that cabt does not need.
+#
+#   pip install --no-deps "git+https://github.com/Kaggle/kaggle-environments.git"
+#
+# (Pinned to the build verified with this repo; bump as needed.)
+kaggle-environments @ git+https://github.com/Kaggle/kaggle-environments.git
+
+# Core runtime deps actually used by the cabt env / our scripts.
+# Pin numpy <2.0: numpy 2.1+ wheels need the x86-64-v2 CPU baseline that the
+# Eden login node lacks (RuntimeError: machine doesn't support X86_V2). torch
+# pulls numpy 2.x, so install/repin numpy LAST.
+numpy>=1.26,<2.0
+jsonschema
+requests
+
+# RL training (CleanRL-style PPO). On the cluster install the CUDA torch wheel
+# from the appropriate index first, THEN repin numpy<2.0.
+torch
+tensorboard

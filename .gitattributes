@@ -1,0 +1,8 @@
+# Shell scripts must be LF — CRLF breaks bash on the Eden cluster
+# (set: pipefail: invalid option name, source failures, tainted PATH).
+*.sh text eol=lf
+# Normalize line endings for text; keep CSV/py as LF on checkout too.
+* text=auto eol=lf
+*.csv text eol=lf
+*.png binary
+*.gz binary
