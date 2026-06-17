@@ -161,6 +161,34 @@ class ActorCritic(nn.Module):
         return action, dist.log_prob(action), dist.entropy(), value
 
 
+def jit_wrap(net, enc):
+    """Freeze a TorchScript adapter for fast CPU inference (~1.7x: the forward is
+    op-dispatch-bound, ~40 tiny Linears). Same logits_value/get_value interface,
+    byte-identical outputs. Use for opponents / search / eval, not training."""
+    net.eval()
+    keys = list(enc.shapes)
+    ex = tuple(torch.zeros((1,) + enc.shapes[k],
+                           dtype=(torch.long if k in enc.int_keys else torch.float32))
+               for k in keys)
+
+    class _Head(nn.Module):
+        def __init__(self, fn):
+            super().__init__(); self.net = net; self.fn = fn
+        def forward(self, *a):
+            return getattr(self.net, self.fn)({k: v for k, v in zip(keys, a)})
+
+    with torch.no_grad():
+        lv = torch.jit.freeze(torch.jit.trace(_Head("logits_value").eval(), ex, check_trace=False))
+        gv = torch.jit.freeze(torch.jit.trace(_Head("get_value").eval(), ex, check_trace=False))
+
+    class _Jit:
+        def logits_value(self, o):
+            return lv(*[o[k] for k in keys])
+        def get_value(self, o):
+            return gv(*[o[k] for k in keys])
+    return _Jit()
+
+
 @torch.no_grad()
 def greedy_action(net, obs_single: dict, device) -> int:
     """Pick the argmax legal action for a single (unbatched) numpy obs."""

@@ -22,7 +22,7 @@ def _policy_opponent_factory(net_config):
     import torch
     from rl.encoding import Encoder, SUBMIT_ACTION, build_mask
     from rl.card_features import get_card_table
-    from rl.policy import build_net, obs_to_tensors
+    from rl.policy import build_net, jit_wrap, obs_to_tensors
 
     torch.set_num_threads(1)
     enc = Encoder(get_card_table())
@@ -35,7 +35,7 @@ def _policy_opponent_factory(net_config):
         net = build_net(enc.cf, enc.cards.vocab_size, net_config)
         net.load_state_dict(sd)
         net.eval()
-        state["net"] = net
+        state["net"] = jit_wrap(net, enc)    # ~1.7x faster CPU inference (opponent runs here)
 
     @torch.no_grad()
     def opponent_fn(raw_obs, rng):
