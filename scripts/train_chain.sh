@@ -20,34 +20,37 @@ RUN=$HOME/pkmn_runs
 PPO_OUT=$RUN/ppo_chain_$TS
 AZ_OUT=$RUN/az_chain_$TS
 
-DECKS=${DECKS:-all}
+DECKS=${DECKS:-all+gen}           # 55-deck pool (official+sample+50 generated)
 INIT_FROM=${INIT_FROM:-$RUN/ppo_cpu_1713153/latest.pt}   # current champion; set "" for fresh
 PPO_HOURS=${PPO_HOURS:-04}
 AZ_HOURS=${AZ_HOURS:-10}
 GPU_PART=${GPU_PART:-hopper}
-CPU_PART=${CPU_PART:-hopper}      # AZ self-play is CPU-bound; runs AFTER PPO so no GPU contention
+CPU_PART=${CPU_PART:-hopper}
+NENVS=${NENVS:-64}                # scale env workers to the 128-core node (was 32)
 
 PPO_INIT=""; [ -n "$INIT_FROM" ] && PPO_INIT="--init-from $INIT_FROM"
 echo "[chain] PPO_OUT=$PPO_OUT"
 echo "[chain] AZ_OUT =$AZ_OUT   decks=$DECKS   warm=${INIT_FROM:-<fresh>}"
 
-# ---- 1) PPO self-play (GPU, multi-deck) ----
+# ---- 1) PPO self-play: 2 GPUs (learner cuda:0 + batched opponent server cuda:1),
+#         NENVS workers on dedicated cores ----
 JID=$(sbatch --parsable \
-  -A re-com -p "$GPU_PART" --gres=gpu:1 --cpus-per-task=16 --mem=64G -t "${PPO_HOURS}:00:00" \
+  -A re-com -p "$GPU_PART" --gres=gpu:2 --cpus-per-task=$((NENVS + 12)) --mem=160G -t "${PPO_HOURS}:00:00" \
   --job-name=pkmn-ppo-chain --output="$HOME/pkmn_ppo_chain_%j.log" \
   --export=ALL,VENV=.venv-gpu,OUT="$PPO_OUT" \
-  scripts/train_exp.sh --arch mlp --decks "$DECKS" --num-envs 32 \
-    --total-timesteps 30000000 --selfplay-start 500000 \
-    --snapshot-every 200000 --save-every 250000 --device cuda $PPO_INIT)
+  scripts/train_exp.sh --arch mlp --decks "$DECKS" --num-envs "$NENVS" \
+    --total-timesteps 40000000 --selfplay-start 500000 \
+    --snapshot-every 200000 --save-every 250000 \
+    --device cuda:0 --server-device cuda:1 $PPO_INIT)
 echo "[chain] submitted PPO: job $JID"
 
 # ---- 2) AZ distill (CPU), starts after PPO TERMINATES (afterany: survives a PPO timeout,
 #         since train.py saves latest.pt periodically), warm-started from the PPO output ----
 AID=$(sbatch --parsable --dependency=afterany:"$JID" \
-  -A re-com -p "$CPU_PART" --cpus-per-task=32 --mem=96G -t "${AZ_HOURS}:00:00" \
+  -A re-com -p "$CPU_PART" --gres=gpu:1 --cpus-per-task=64 --mem=160G -t "${AZ_HOURS}:00:00" \
   --job-name=pkmn-az-chain --output="$HOME/pkmn_az_chain_%j.log" \
-  --export=ALL,OUT="$AZ_OUT" \
-  scripts/az.sh --init-from "$PPO_OUT/latest.pt" --decks "$DECKS" --workers 32 \
-    --games-per-iter 256 --iters 300 --n-sims 40 --n-det 2 --device cpu)
+  --export=ALL,VENV=.venv-gpu,OUT="$AZ_OUT" \
+  scripts/az.sh --init-from "$PPO_OUT/latest.pt" --decks "$DECKS" --workers 48 \
+    --games-per-iter 384 --iters 300 --n-sims 40 --n-det 2 --device cuda)
 echo "[chain] submitted AZ:  job $AID  (afterany:$JID)"
 echo "[chain] monitor: squeue -u \$USER ;  tail -f $HOME/pkmn_ppo_chain_${JID}.log"
