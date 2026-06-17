@@ -22,9 +22,12 @@ from rl.env import load_deck
 from sdk_cg.game import battle_start, battle_select, battle_finish
 
 def load(path, enc, ct):
+    from rl.policy import load_compatible
     ck = torch.load(path, map_location="cpu")
     net = build_net(enc.cf, ct.vocab_size, ck.get("net_config", {"emb_dim": 32}))
-    net.load_state_dict(ck["net"]); net.eval()
+    skipped = load_compatible(net, ck["net"]); net.eval()
+    if skipped:
+        print(f"  [warn] {path}: reinit {skipped} (cross-encoding load -> imperfect reference)")
     return net
 
 def ci95(w, n):
