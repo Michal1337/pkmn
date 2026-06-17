@@ -119,7 +119,7 @@ def main():
     from .decks import DECKS
     from .encoding import Encoder
     from .env import load_deck
-    from .policy import build_net, obs_to_tensors
+    from .policy import build_net, load_compatible, obs_to_tensors
     ct = get_card_table(); enc = Encoder(ct)
     if args.deck:
         deck_pool = [[int(l) for l in open(args.deck) if l.strip()]]
@@ -142,7 +142,9 @@ def main():
         net_config = ck.get("net_config", net_config)
     net = build_net(enc.cf, ct.vocab_size, net_config).to(device)
     if args.init_from:
-        net.load_state_dict(ck["net"]); print(f"[init] warm-started from {args.init_from}", flush=True)
+        skipped = load_compatible(net, ck["net"])
+        msg = f" (reinit {len(skipped)} params: {skipped})" if skipped else ""
+        print(f"[init] warm-started from {args.init_from}{msg}", flush=True)
     opt = optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
     print(f"[net] params={sum(p.numel() for p in net.parameters()):,}", flush=True)
 

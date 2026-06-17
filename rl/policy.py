@@ -22,7 +22,17 @@ from .encoding import MAX_OPTIONS, N_SELECT_TYPES, N_SELECT_CTX
 # These keys are int64 id tensors; everything else is float32.
 # Must match Encoder.int_keys.
 _INT_KEYS = {"self_active_id", "opp_active_id", "self_bench_id", "opp_bench_id",
-             "hand_id", "stadium_id", "opt_card_id", "select_type", "select_context"}
+             "hand_id", "self_discard_id", "opp_discard_id",
+             "stadium_id", "opt_card_id", "select_type", "select_context"}
+
+
+def load_compatible(net, state_dict):
+    """Warm-start: load every parameter whose shape matches; skip the rest (e.g. a
+    layer whose input dim changed across an encoding revision). Returns skipped keys."""
+    own = net.state_dict()
+    keep = {k: v for k, v in state_dict.items() if k in own and v.shape == own[k].shape}
+    net.load_state_dict(keep, strict=False)
+    return sorted(set(own) - set(keep))
 
 
 def obs_to_tensors(obs: dict, device) -> dict:
@@ -67,7 +77,7 @@ class ActorCritic(nn.Module):
 
         self.slot_enc = _mlp([card_h + 18, card_h, card_h])   # +dyn(18)
         self.hand_enc = _mlp([card_h, card_h])
-        self.disc_enc = _mlp([card_feat_dim, 64])
+        self.disc_enc = _mlp([card_h, 64])                    # per-card discard, pooled
         self.stad_enc = _mlp([card_h, 64])
         self.opt_enc = _mlp([card_h + 28, opt_h, opt_h])      # +opt_dyn(28)
 
@@ -108,8 +118,10 @@ class ActorCritic(nn.Module):
         hand_c = self._cards(o["hand_static"], o["hand_id"])
         hand = _masked_mean(self.hand_enc(hand_c), o["hand_mask"])
 
-        self_disc = self.disc_enc(o["self_discard_agg"])
-        opp_disc = self.disc_enc(o["opp_discard_agg"])
+        sd_c = self._cards(o["self_discard_static"], o["self_discard_id"])
+        self_disc = _masked_mean(self.disc_enc(sd_c), o["self_discard_mask"])
+        od_c = self._cards(o["opp_discard_static"], o["opp_discard_id"])
+        opp_disc = _masked_mean(self.disc_enc(od_c), o["opp_discard_mask"])
         stad_c = self._cards(o["stadium_static"].unsqueeze(1), o["stadium_id"]).squeeze(1)
         stad = self.stad_enc(stad_c)
 
@@ -226,10 +238,11 @@ class TransformerActorCritic(nn.Module):
         st = self._card_tok(o["stadium_static"].unsqueeze(1), o["stadium_id"]) + self._type(B, 1, _T_STAD, dev)
         toks.append(st); pads.append((o["stadium_id"] == 0))
 
-        # discard aggregates (self/opp) — always present
+        # discard: per-card tokens (self/opp), identity-aware
         for side in ("self", "opp"):
-            d = self.disc_proj(o[f"{side}_discard_agg"]).unsqueeze(1) + self._type(B, 1, _T_DISC, dev)
-            toks.append(d); pads.append(torch.zeros(B, 1, dtype=torch.bool, device=dev))
+            d = self._card_tok(o[f"{side}_discard_static"], o[f"{side}_discard_id"]) \
+                + self._type(B, o[f"{side}_discard_id"].shape[1], _T_DISC, dev)
+            toks.append(d); pads.append(o[f"{side}_discard_mask"] < 0.5)
 
         # options (the action candidates)
         oc = self._card_tok(o["opt_card_static"], o["opt_card_id"])

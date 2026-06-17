@@ -31,6 +31,7 @@ from .card_features import CardTable, N_ENERGY, get_card_table
 # ---- shape constants (tune here) -------------------------------------------
 N_BENCH = 5          # bench slots (active is encoded separately)
 MAX_HAND = 20        # observed max hand ~17
+MAX_DISCARD = 30     # per-card discard window (rest summarized by the count scalar)
 MAX_OPTIONS = 128    # ladder emitted 98-option selects; 128 gives headroom (was 96).
                      # Pointer-scored, so widening costs no weights; search_agent still
                      # caps/pads/masks beyond this as a bound-free backstop.
@@ -71,7 +72,8 @@ class Encoder:
             "self_bench_static": (N_BENCH, cf), "opp_bench_static": (N_BENCH, cf),
             "self_bench_id": (N_BENCH,), "opp_bench_id": (N_BENCH,),
             "hand_static": (MAX_HAND, cf), "hand_id": (MAX_HAND,), "hand_mask": (MAX_HAND,),
-            "self_discard_agg": (cf,), "opp_discard_agg": (cf,),
+            "self_discard_static": (MAX_DISCARD, cf), "self_discard_id": (MAX_DISCARD,), "self_discard_mask": (MAX_DISCARD,),
+            "opp_discard_static": (MAX_DISCARD, cf), "opp_discard_id": (MAX_DISCARD,), "opp_discard_mask": (MAX_DISCARD,),
             "stadium_static": (cf,), "stadium_id": (1,),
             "opt_dyn": (MAX_OPTIONS, 28),
             "opt_card_static": (MAX_OPTIONS, cf), "opt_card_id": (MAX_OPTIONS,),
@@ -82,7 +84,8 @@ class Encoder:
     @property
     def int_keys(self):
         return {"self_active_id", "opp_active_id", "self_bench_id", "opp_bench_id",
-                "hand_id", "stadium_id", "opt_card_id", "select_type", "select_context"}
+                "hand_id", "self_discard_id", "opp_discard_id",
+                "stadium_id", "opt_card_id", "select_type", "select_context"}
 
     # ---- helpers ----------------------------------------------------------
     def _energy_hist(self, energies) -> np.ndarray:
@@ -140,15 +143,15 @@ class Encoder:
             1.0 if pl.get("confused") else 0.0,
         ], dtype=np.float32)
 
-    def _discard_agg(self, pl) -> np.ndarray:
-        disc = pl.get("discard") or []
-        if not disc:
-            return np.zeros(self.cf, np.float32)
-        acc = np.zeros(self.cf, np.float32)
-        for c in disc:
-            cid = c.get("id") if isinstance(c, dict) else c
-            acc += self.cards.features(cid)
-        return acc / len(disc)
+    def _pile(self, cards, n):
+        """A card pile (hand/discard) -> (static[n,cf], ids[n], mask[n]), per-card."""
+        static = np.zeros((n, self.cf), np.float32)
+        ids = np.zeros(n, np.int64)
+        mask = np.zeros(n, np.float32)
+        for i, c in enumerate((cards or [])[:n]):
+            cid = (c.get("id") if isinstance(c, dict) else c) or 0
+            static[i] = self.cards.features(cid); ids[i] = cid; mask[i] = 1.0
+        return static, ids, mask
 
     def _option_row(self, o: dict, cid: int) -> tuple[np.ndarray, np.ndarray, int]:
         """``cid`` is the option's resolved card id (0 if none)."""
@@ -208,20 +211,12 @@ class Encoder:
         out["opp_bench_dyn"], out["opp_bench_static"], out["opp_bench_id"] = self._bench(op)
         out["self_player"] = self._player(mp)
         out["opp_player"] = self._player(op)
-        out["self_discard_agg"] = self._discard_agg(mp)
-        out["opp_discard_agg"] = self._discard_agg(op)
 
-        # own hand (opponent hand is hidden -> only handCount, already in player vec)
-        hand = mp.get("hand") or []
-        hand_static = np.zeros((MAX_HAND, self.cf), np.float32)
-        hand_id = np.zeros(MAX_HAND, np.int64)
-        hand_mask = np.zeros(MAX_HAND, np.float32)
-        for i, c in enumerate(hand[:MAX_HAND]):
-            cid = c.get("id") if isinstance(c, dict) else c
-            hand_static[i] = self.cards.features(cid)
-            hand_id[i] = cid or 0
-            hand_mask[i] = 1.0
-        out["hand_static"], out["hand_id"], out["hand_mask"] = hand_static, hand_id, hand_mask
+        # discard: per-card (identity-aware), both sides public. Own hand per-card too
+        # (opponent hand is hidden -> only handCount, already in the player vec).
+        out["self_discard_static"], out["self_discard_id"], out["self_discard_mask"] = self._pile(mp.get("discard"), MAX_DISCARD)
+        out["opp_discard_static"], out["opp_discard_id"], out["opp_discard_mask"] = self._pile(op.get("discard"), MAX_DISCARD)
+        out["hand_static"], out["hand_id"], out["hand_mask"] = self._pile(mp.get("hand"), MAX_HAND)
 
         # stadium
         stad = s.get("stadium") or []

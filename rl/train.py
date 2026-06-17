@@ -26,7 +26,7 @@ from .card_features import get_card_table
 from .decks import DECKS
 from .encoding import Encoder
 from .env import load_deck
-from .policy import build_net, obs_to_tensors
+from .policy import build_net, load_compatible, obs_to_tensors
 from .vec_env import SubprocVecEnv
 
 
@@ -130,8 +130,9 @@ def main():
 
     if args.init_from:
         ck = torch.load(args.init_from, map_location=device)
-        net.load_state_dict(ck["net"])
-        print(f"[init] loaded {args.init_from} (was trained to step {ck.get('global_step')})", flush=True)
+        skipped = load_compatible(net, ck["net"])
+        msg = f" (reinit {len(skipped)} params: {skipped})" if skipped else ""
+        print(f"[init] loaded {args.init_from} (was trained to step {ck.get('global_step')}){msg}", flush=True)
 
     shapes = enc.shapes
     # rollout storage (obs kept on device)
