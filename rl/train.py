@@ -26,7 +26,7 @@ from .card_features import get_card_table
 from .decks import DECKS
 from .encoding import Encoder
 from .env import load_deck
-from .policy import ActorCritic, obs_to_tensors
+from .policy import build_net, obs_to_tensors
 from .vec_env import SubprocVecEnv
 
 
@@ -71,8 +71,18 @@ def parse_args():
                    help="deck pool: 'all' (4 official + sample), 'official' (4), 'sample', "
                         "or a named deck from rl.decks (e.g. mega_abomasnow)")
     p.add_argument("--no-randomize-side", action="store_true")
-    # net
+    # net (architecture)
+    p.add_argument("--arch", choices=["mlp", "transformer"], default="mlp")
     p.add_argument("--emb-dim", type=int, default=32)
+    # mlp dims
+    p.add_argument("--card-h", type=int, default=64)
+    p.add_argument("--trunk-h", type=int, default=256)
+    p.add_argument("--opt-h", type=int, default=96)
+    # transformer dims
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--nhead", type=int, default=4)
+    p.add_argument("--nlayers", type=int, default=3)
+    p.add_argument("--ff", type=int, default=256)
     p.add_argument("--init-from", type=str, default=None,
                    help="checkpoint .pt to load net weights from (resume / start self-play from)")
     # infra
@@ -97,7 +107,12 @@ def main():
 
     ct = get_card_table()
     enc = Encoder(ct)
-    net_config = {"emb_dim": args.emb_dim}
+    if args.arch == "transformer":
+        net_config = {"arch": "transformer", "emb_dim": args.emb_dim, "d_model": args.d_model,
+                      "nhead": args.nhead, "nlayers": args.nlayers, "ff": args.ff}
+    else:
+        net_config = {"arch": "mlp", "emb_dim": args.emb_dim, "card_h": args.card_h,
+                      "trunk_h": args.trunk_h, "opt_h": args.opt_h}
 
     pool = resolve_deck_pool(args.decks)
     print(f"[decks] pool='{args.decks}' -> {len(pool)} deck(s); both sides sampled per episode", flush=True)
@@ -109,7 +124,7 @@ def main():
     }
     envs = SubprocVecEnv(args.num_envs, env_kwargs, net_config, base_seed=args.seed * 1000)
 
-    net = ActorCritic(enc.cf, ct.vocab_size, **net_config).to(device)
+    net = build_net(enc.cf, ct.vocab_size, net_config).to(device)
     opt = optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
     print(f"[net] params={sum(p.numel() for p in net.parameters()):,}", flush=True)
 

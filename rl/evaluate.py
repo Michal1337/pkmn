@@ -24,7 +24,7 @@ from .card_features import get_card_table
 from .decks import DECKS
 from .encoding import Encoder, SUBMIT_ACTION
 from .env import CabtEnv, load_deck, random_opponent
-from .policy import ActorCritic, greedy_action
+from .policy import build_net, greedy_action
 
 
 def named_deck(name: str) -> list[int]:
@@ -98,12 +98,10 @@ def main():
     ct = get_card_table()
     enc = Encoder(ct)
 
-    net_config = {}
-    net = ActorCritic(enc.cf, ct.vocab_size, **net_config).to(device)
+    net = build_net(enc.cf, ct.vocab_size, {}).to(device)
     if args.ckpt:
         ck = torch.load(args.ckpt, map_location=device)
-        net_config = ck.get("net_config", {})
-        net = ActorCritic(enc.cf, ct.vocab_size, **net_config).to(device)
+        net = build_net(enc.cf, ct.vocab_size, ck.get("net_config", {})).to(device)
         net.load_state_dict(ck["net"])
         print(f"loaded {args.ckpt} (trained to step {ck.get('global_step')})")
     net.eval()

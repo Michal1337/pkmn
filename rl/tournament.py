@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import logging
+import os
 
 logging.disable(logging.CRITICAL)
 
@@ -27,7 +28,7 @@ import torch
 from .card_features import get_card_table
 from .encoding import Encoder, SUBMIT_ACTION
 from .env import load_deck
-from .policy import ActorCritic, obs_to_tensors
+from .policy import build_net, obs_to_tensors
 
 
 # ---- policies: (raw_obs, rng) -> full engine selection list[int] ----------
@@ -158,10 +159,11 @@ def main():
     names, pols = [], []
     for path in args.ckpts:
         ck = torch.load(path, map_location=device)
-        net = ActorCritic(enc.cf, ct.vocab_size, **ck.get("net_config", {})).to(device)
+        net = build_net(enc.cf, ct.vocab_size, ck.get("net_config", {})).to(device)
         net.load_state_dict(ck["net"]); net.eval()
         step = ck.get("global_step", "?")
-        names.append(f"step{step}")
+        tag = os.path.basename(os.path.dirname(os.path.abspath(path)))  # run dir, disambiguates same-step ckpts
+        names.append(f"{tag}@{step}")
         pols.append(net_policy(net, enc, device, temp=args.temp))
     anchor_idx = None
     if args.anchor_first:

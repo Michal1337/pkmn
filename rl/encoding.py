@@ -31,7 +31,10 @@ from .card_features import CardTable, N_ENERGY, get_card_table
 # ---- shape constants (tune here) -------------------------------------------
 N_BENCH = 5          # bench slots (active is encoded separately)
 MAX_HAND = 20        # observed max hand ~17
-MAX_OPTIONS = 96     # observed max options ~69; index MAX_OPTIONS == "submit"
+MAX_OPTIONS = 128    # ladder emitted 98-option selects; 128 gives headroom (was 96).
+                     # Pointer-scored, so widening costs no weights; search_agent still
+                     # caps/pads/masks beyond this as a bound-free backstop.
+                     # index MAX_OPTIONS == "submit"
 N_OPT_TYPES = 16     # OptionType range 0..15
 N_SELECT_TYPES = 16  # SelectType range
 N_SELECT_CTX = 64    # SelectContext embedding vocab cap

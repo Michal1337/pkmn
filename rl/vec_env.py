@@ -22,7 +22,7 @@ def _policy_opponent_factory(net_config):
     import torch
     from rl.encoding import Encoder, SUBMIT_ACTION, build_mask
     from rl.card_features import get_card_table
-    from rl.policy import ActorCritic, obs_to_tensors
+    from rl.policy import build_net, obs_to_tensors
 
     torch.set_num_threads(1)
     enc = Encoder(get_card_table())
@@ -32,7 +32,7 @@ def _policy_opponent_factory(net_config):
         if sd is None:
             state["net"] = None
             return
-        net = ActorCritic(enc.cf, enc.cards.vocab_size, **net_config)
+        net = build_net(enc.cf, enc.cards.vocab_size, net_config)
         net.load_state_dict(sd)
         net.eval()
         state["net"] = net

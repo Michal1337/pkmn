@@ -150,8 +150,126 @@ class ActorCritic(nn.Module):
 
 
 @torch.no_grad()
-def greedy_action(net: ActorCritic, obs_single: dict, device) -> int:
+def greedy_action(net, obs_single: dict, device) -> int:
     """Pick the argmax legal action for a single (unbatched) numpy obs."""
     o = {k: v[None] for k, v in obs_to_tensors(obs_single, device).items()}
     logits, _ = net.logits_value(o)
     return int(logits.argmax(dim=-1).item())
+
+
+# ---- Transformer policy: state as a token set, attention + pointer scoring ----
+# Token type ids (for the type/zone embedding).
+_T_GLOBAL, _T_SACT, _T_SBEN, _T_OACT, _T_OBEN, _T_HAND, _T_STAD, _T_DISC, _T_OPT = range(9)
+_N_TTYPES = 9
+
+
+class TransformerActorCritic(nn.Module):
+    """Encodes the board+hand+options as tokens, runs a Transformer encoder, then
+    scores each OPTION token (pointer-style) and reads value/submit off a CLS token.
+    Same interface as ActorCritic (logits_value/get_value/get_action_and_value)."""
+
+    def __init__(self, card_feat_dim: int, vocab_size: int, emb_dim: int = 32,
+                 d_model: int = 128, nhead: int = 4, nlayers: int = 3, ff: int = 256):
+        super().__init__()
+        self.cf = card_feat_dim
+        self.d = d_model
+        self.card_emb = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
+        self.type_emb = nn.Embedding(_N_TTYPES, d_model)
+        self.cls = nn.Parameter(torch.zeros(d_model))
+        # projections -> d_model
+        self.card_proj = nn.Linear(card_feat_dim + emb_dim, d_model)  # any card token
+        self.poke_dyn = nn.Linear(18, d_model)                        # board dynamic feats
+        self.opt_dyn = nn.Linear(28, d_model)                         # option dynamic feats
+        self.disc_proj = nn.Linear(card_feat_dim, d_model)            # discard aggregate
+        self.scalar_proj = nn.Linear(14, d_model)
+        self.sel_type_emb = nn.Embedding(N_SELECT_TYPES, d_model)
+        self.sel_ctx_emb = nn.Embedding(N_SELECT_CTX, d_model)
+        layer = nn.TransformerEncoderLayer(d_model, nhead, ff, batch_first=True, dropout=0.0)
+        self.encoder = nn.TransformerEncoder(layer, nlayers)
+        self.opt_head = nn.Linear(d_model, 1)
+        self.submit_head = nn.Linear(d_model, 1)
+        self.value_head = nn.Linear(d_model, 1)
+
+    def _card_tok(self, static, ids):
+        return self.card_proj(torch.cat([static, self.card_emb(ids)], dim=-1))
+
+    def _type(self, B, K, t, device):
+        return self.type_emb(torch.full((B, K), t, dtype=torch.long, device=device))
+
+    def _encode(self, o: dict):
+        dev = o["scalars"].device
+        B = o["scalars"].shape[0]
+        toks, pads = [], []
+
+        # global / CLS token (carries scalars + select context)
+        g = (self.cls.expand(B, 1, self.d)
+             + self.scalar_proj(o["scalars"]).unsqueeze(1)
+             + self.sel_type_emb(o["select_type"].squeeze(-1)).unsqueeze(1)
+             + self.sel_ctx_emb(o["select_context"].squeeze(-1)).unsqueeze(1)
+             + self._type(B, 1, _T_GLOBAL, dev))
+        toks.append(g); pads.append(torch.zeros(B, 1, dtype=torch.bool, device=dev))
+
+        def add_pokes(side, ttype):
+            for grp, n, tt in [("active", 1, ttype[0]), ("bench", o[f"{side}_bench_dyn"].shape[1], ttype[1])]:
+                c = self._card_tok(o[f"{side}_{grp}_static"], o[f"{side}_{grp}_id"])
+                t = c + self.poke_dyn(o[f"{side}_{grp}_dyn"]) + self._type(B, c.shape[1], tt, dev)
+                present = o[f"{side}_{grp}_dyn"][..., 0] > 0.5      # present flag
+                toks.append(t); pads.append(~present)
+        add_pokes("self", (_T_SACT, _T_SBEN))
+        add_pokes("opp", (_T_OACT, _T_OBEN))
+
+        # hand
+        h = self._card_tok(o["hand_static"], o["hand_id"]) + self._type(B, o["hand_id"].shape[1], _T_HAND, dev)
+        toks.append(h); pads.append(o["hand_mask"] < 0.5)
+
+        # stadium (single)
+        st = self._card_tok(o["stadium_static"].unsqueeze(1), o["stadium_id"]) + self._type(B, 1, _T_STAD, dev)
+        toks.append(st); pads.append((o["stadium_id"] == 0))
+
+        # discard aggregates (self/opp) — always present
+        for side in ("self", "opp"):
+            d = self.disc_proj(o[f"{side}_discard_agg"]).unsqueeze(1) + self._type(B, 1, _T_DISC, dev)
+            toks.append(d); pads.append(torch.zeros(B, 1, dtype=torch.bool, device=dev))
+
+        # options (the action candidates)
+        oc = self._card_tok(o["opt_card_static"], o["opt_card_id"])
+        ot = oc + self.opt_dyn(o["opt_dyn"]) + self._type(B, oc.shape[1], _T_OPT, dev)
+        opt_present = o["opt_dyn"][..., :16].sum(-1) > 0            # a real option has a type one-hot
+        n_opt = ot.shape[1]
+        toks.append(ot); pads.append(~opt_present)
+
+        seq = torch.cat(toks, dim=1)
+        pad = torch.cat(pads, dim=1)
+        enc = self.encoder(seq, src_key_padding_mask=pad)
+        cls = enc[:, 0]                       # global token
+        opt_enc = enc[:, -n_opt:]             # last n_opt tokens are the options
+        return cls, opt_enc
+
+    def logits_value(self, o: dict):
+        cls, opt_enc = self._encode(o)
+        opt_logits = self.opt_head(opt_enc).squeeze(-1)            # [B, MAX_OPTIONS]
+        submit_logit = self.submit_head(cls)                      # [B,1]
+        logits = torch.cat([opt_logits, submit_logit], dim=-1)
+        logits = logits.masked_fill(o["action_mask"] < 0.5, -1e9)
+        return logits, self.value_head(cls).squeeze(-1)
+
+    def get_value(self, o: dict):
+        cls, _ = self._encode(o)
+        return self.value_head(cls).squeeze(-1)
+
+    def get_action_and_value(self, o: dict, action=None):
+        logits, value = self.logits_value(o)
+        dist = Categorical(logits=logits)
+        if action is None:
+            action = dist.sample()
+        return action, dist.log_prob(action), dist.entropy(), value
+
+
+def build_net(card_feat_dim: int, vocab_size: int, net_config: dict):
+    """Dispatch on net_config['arch'] ('mlp' default | 'transformer'). The
+    remaining keys are constructor kwargs for the chosen class."""
+    cfg = dict(net_config or {})
+    arch = cfg.pop("arch", "mlp")
+    if arch == "transformer":
+        return TransformerActorCritic(card_feat_dim, vocab_size, **cfg)
+    return ActorCritic(card_feat_dim, vocab_size, **cfg)

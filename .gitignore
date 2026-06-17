@@ -12,8 +12,8 @@ env/
 # Submission artifacts
 submission.tar.gz
 *.tar.gz
-submission_rl*/
-submission_selfplay/
+submission_*/
+.mcts*
 
 # Model checkpoints / training runs (regenerable; large)
 *.pt

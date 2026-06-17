@@ -105,12 +105,41 @@ def SELECT(o):
 '''
 
 
+MCTS_HEAD = '''\
+import random
+import torch
+from card_features import get_card_table
+from encoding import Encoder, SUBMIT_ACTION
+from policy import build_net
+import search_agent
+
+_CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
+_ENC = Encoder(_CARDS)
+_CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
+_NET = build_net(_ENC.cf, _CARDS.vocab_size, _CK.get("net_config", {}))
+_NET.load_state_dict(_CK["net"])
+_NET.eval()
+_RNG = random.Random(0)
+_NSIMS = 40
+_NDET = 2
+
+with open(os.path.join(_agent_dir(), "deck.csv")) as f:
+    DECK = [int(line) for line in f if line.strip()]
+
+
+def agent(obs):
+    # mcts_select handles the deck step (select None) and non-searchable selects.
+    return search_agent.mcts_select(obs, _NET, _ENC, DECK, "cpu",
+                                    n_sims=_NSIMS, n_det=_NDET, rng=_RNG)
+'''
+
+
 def copy_module(src_name, dst_path):
     """Copy an rl/ module to the flat bundle, fixing relative imports."""
     with open(os.path.join(RL, src_name), encoding="utf-8") as f:
         code = f.read()
-    code = code.replace("from .card_features import", "from card_features import")
-    code = code.replace("from .encoding import", "from encoding import")
+    for m in ("card_features", "encoding", "policy", "search_agent", "numpy_policy", "decks"):
+        code = code.replace(f"from .{m} import", f"from {m} import")
     with open(dst_path, "w", encoding="utf-8") as f:
         f.write(code)
 
@@ -118,7 +147,7 @@ def copy_module(src_name, dst_path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ckpt", required=True)
-    p.add_argument("--backend", choices=["torch", "numpy"], default="torch")
+    p.add_argument("--backend", choices=["torch", "numpy", "mcts"], default="torch")
     p.add_argument("--deck", default=os.path.join(ROOT, "agent", "deck.csv"))
     p.add_argument("--csv", default=os.path.join(ROOT, "EN_Card_Data.csv"))
     p.add_argument("--out", default=None)
@@ -143,6 +172,14 @@ def main():
         copy_module("policy.py", os.path.join(b, "policy.py"))
         torch.save(ck, os.path.join(b, "model.pt"))
         main_py = _DIR_FINDER + TORCH_HEAD + _AGENT_FN
+    elif args.backend == "mcts":
+        copy_module("policy.py", os.path.join(b, "policy.py"))
+        copy_module("decks.py", os.path.join(b, "decks.py"))      # candidate decklists
+        copy_module("search_agent.py", os.path.join(b, "search_agent.py"))
+        torch.save(ck, os.path.join(b, "model.pt"))
+        shutil.copytree(os.path.join(ROOT, "sdk_cg"), os.path.join(b, "sdk_cg"),
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        main_py = _DIR_FINDER + MCTS_HEAD       # MCTS_HEAD defines agent() itself
     else:
         copy_module("numpy_policy.py", os.path.join(b, "numpy_policy.py"))
         np.savez(os.path.join(b, "model.npz"),
