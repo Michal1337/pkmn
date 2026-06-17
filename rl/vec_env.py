@@ -13,46 +13,28 @@ import multiprocessing as mp
 import numpy as np
 
 
-def _policy_opponent_factory(net_config):
-    """Build a worker-local opponent that plays via a frozen policy snapshot.
-
-    Returns (opponent_fn, set_weights) where opponent_fn(raw_obs, rng)->list[int]
-    assembles a full engine selection by running the net with internal buffering.
-    """
-    import torch
-    from rl.encoding import Encoder, SUBMIT_ACTION, build_mask
+def _policy_opponent_factory(client):
+    """Build a worker opponent that runs the snapshot net via the central inference
+    SERVER (batched across workers). `client` is a rl.infer_server.ServerNet.
+    Returns (opponent_fn, set_use) where set_use(bool) toggles server vs random."""
+    from rl.encoding import Encoder, SUBMIT_ACTION
     from rl.card_features import get_card_table
-    from rl.policy import build_net, jit_wrap, obs_to_tensors
 
-    torch.set_num_threads(1)
     enc = Encoder(get_card_table())
-    state = {"net": None}
+    state = {"use": False}
 
-    def set_weights(sd):
-        if sd is None:
-            state["net"] = None
-            return
-        net = build_net(enc.cf, enc.cards.vocab_size, net_config)
-        net.load_state_dict(sd)
-        net.eval()
-        state["net"] = jit_wrap(net, enc)    # ~1.7x faster CPU inference (opponent runs here)
+    def set_use(flag):
+        state["use"] = bool(flag)
 
-    @torch.no_grad()
     def opponent_fn(raw_obs, rng):
-        net = state["net"]
-        if net is None:  # fall back to random legal
-            sel = raw_obs["select"]
+        sel = raw_obs["select"]
+        if not state["use"]:                  # random legal (warmup / no snapshot yet)
             n, k = len(sel["option"]), sel["maxCount"]
             return rng.sample(range(n), min(k, n)) if n else []
-        sel = raw_obs["select"]
         picked: list[int] = []
         while True:
-            o = enc.encode(raw_obs, set(picked))
-            ot = {k: torch.as_tensor(v[None]) for k, v in
-                  {kk: (vv.astype("int64") if kk in enc.int_keys else vv.astype("float32"))
-                   for kk, vv in o.items()}.items()}
-            logits, _ = net.logits_value(ot)
-            a = int(logits.argmax(-1).item())
+            logits = client.logits_value(enc.encode(raw_obs, set(picked)))   # batched on the server
+            a = int(logits.argmax())
             if a == SUBMIT_ACTION:
                 break
             picked.append(a)
@@ -60,10 +42,10 @@ def _policy_opponent_factory(net_config):
                 break
         return sorted(set(picked))
 
-    return opponent_fn, set_weights
+    return opponent_fn, set_use
 
 
-def _worker(remote, parent_remote, env_kwargs, net_config, seed):
+def _worker(remote, parent_remote, env_kwargs, client, seed):
     parent_remote.close()
     import logging; logging.disable(logging.CRITICAL)
     from rl.env import CabtEnv, prize_diff_shaping
@@ -72,7 +54,7 @@ def _worker(remote, parent_remote, env_kwargs, net_config, seed):
     shaping = env_kwargs.pop("shaping", None)
     reward_shaping = prize_diff_shaping(0.1) if shaping == "prize_diff" else None
 
-    opponent_fn, set_weights = _policy_opponent_factory(net_config)
+    opponent_fn, set_use = _policy_opponent_factory(client)
     env = CabtEnv(seed=seed, opponent_fn=opponent_fn,
                   reward_shaping=reward_shaping, **env_kwargs)
 
@@ -89,8 +71,8 @@ def _worker(remote, parent_remote, env_kwargs, net_config, seed):
                     info = {**info, "terminal_reward": r, "truncated": trunc}
                     obs, _ = env.reset()  # auto-reset
                 remote.send((obs, r, done, info))
-            elif cmd == "set_opponent":
-                set_weights(data)
+            elif cmd == "set_opponent":            # data = use-server flag (bool)
+                set_use(data)
                 remote.send(True)
             elif cmd == "close":
                 env.close()
@@ -104,14 +86,19 @@ def _worker(remote, parent_remote, env_kwargs, net_config, seed):
 
 class SubprocVecEnv:
     def __init__(self, num_envs: int, env_kwargs: dict, net_config: dict,
-                 base_seed: int = 0, start_method: str | None = None):
+                 base_seed: int = 0, start_method: str | None = None,
+                 server_device: str = "cpu"):
+        from rl.infer_server import InferenceServer
         self.num_envs = num_envs
         ctx = mp.get_context(start_method or ("spawn"))
+        # central inference server: batches the snapshot-opponent forwards across workers
+        self.server = InferenceServer(net_config, num_envs, device=server_device,
+                                      max_batch=max(num_envs, 32), ctx=ctx)
         self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(num_envs)])
         self.procs = []
         for i, (wr, r) in enumerate(zip(self.work_remotes, self.remotes)):
             p = ctx.Process(target=_worker,
-                            args=(wr, r, env_kwargs, net_config, base_seed + i),
+                            args=(wr, r, env_kwargs, self.server.client(i), base_seed + i),
                             daemon=True)
             p.start()
             self.procs.append(p)
@@ -138,9 +125,13 @@ class SubprocVecEnv:
                 list(infos))
 
     def set_opponent(self, state_dict):
-        """Broadcast opponent weights (CPU state_dict) or None (=random)."""
+        """Set the snapshot opponent: weights go to the inference server (once), and
+        workers are toggled to use it. state_dict=None -> random opponent."""
+        use = state_dict is not None
+        if use:
+            self.server.set_weights(state_dict)        # central, batched
         for r in self.remotes:
-            r.send(("set_opponent", state_dict))
+            r.send(("set_opponent", use))
         return [r.recv() for r in self.remotes]
 
     def close(self):
@@ -151,3 +142,7 @@ class SubprocVecEnv:
                 pass
         for p in self.procs:
             p.join(timeout=5)
+        try:
+            self.server.close()
+        except Exception:
+            pass

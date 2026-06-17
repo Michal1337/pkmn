@@ -97,6 +97,8 @@ def parse_args():
                    help="checkpoint .pt to load net weights from (resume / start self-play from)")
     # infra
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--server-device", type=str, default="cpu",
+                   help="device for the batched opponent inference server (cpu safe; cuda faster)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", type=str, default=os.path.join(os.environ.get("HOME", "."), "pkmn_runs", "ppo"))
     p.add_argument("--save-every", type=int, default=500_000)
@@ -132,7 +134,8 @@ def main():
         "randomize_side": not args.no_randomize_side,
         "shaping": args.shaping,
     }
-    envs = SubprocVecEnv(args.num_envs, env_kwargs, net_config, base_seed=args.seed * 1000)
+    envs = SubprocVecEnv(args.num_envs, env_kwargs, net_config, base_seed=args.seed * 1000,
+                         server_device=args.server_device)   # opponent inference batched here
 
     net = build_net(enc.cf, ct.vocab_size, net_config).to(device)
     opt = optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
