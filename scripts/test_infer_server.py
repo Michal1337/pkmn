@@ -49,6 +49,13 @@ def main():
     print(f"[correctness] logits max diff {np.abs(srv_lg-loc_lg).max():.2e}  "
           f"argmax match {int(srv_lg.argmax()==loc_lg.argmax())}  value diff {abs(srv_v-loc_v):.2e}")
 
+    # --- resilience: a poison request must NOT deadlock; server returns sentinel and survives ---
+    poison = dict(arr); poison["opt_card_id"] = np.full_like(arr["opt_card_id"], 10**9)  # OOB embedding idx
+    r = c.logits_value(poison)                 # must come back (None), not hang
+    alive = c.logits_value(arr)                # server still serving after the error
+    print(f"[resilience] poison -> {'None sentinel' if r is None else 'NOT None (BUG)'}; "
+          f"server alive after error: {alive is not None}")
+
     # --- throughput: 8 concurrent clients vs single-process local baseline ---
     ctx = mp.get_context("spawn"); retq = ctx.Queue(); secs = 4.0
     procs = [ctx.Process(target=_hammer, args=(srv.client(i), arr, secs, retq)) for i in range(8)]

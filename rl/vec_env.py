@@ -34,6 +34,9 @@ def _policy_opponent_factory(client):
         picked: list[int] = []
         while True:
             logits = client.logits_value(enc.encode(raw_obs, set(picked)))   # batched on the server
+            if logits is None:                # server hit an error -> random legal, never hang
+                n, k = len(sel["option"]), sel["maxCount"]
+                return rng.sample(range(n), min(k, n)) if n else []
             a = int(logits.argmax())
             if a == SUBMIT_ACTION:
                 break
@@ -93,7 +96,7 @@ class SubprocVecEnv:
         ctx = mp.get_context(start_method or ("spawn"))
         # central inference server: batches the snapshot-opponent forwards across workers
         self.server = InferenceServer(net_config, num_envs, device=server_device,
-                                      max_batch=max(num_envs, 32), ctx=ctx)
+                                      max_batch=max(num_envs * 2, 256), ctx=ctx)  # amortize scattered arrivals
         self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(num_envs)])
         self.procs = []
         for i, (wr, r) in enumerate(zip(self.work_remotes, self.remotes)):

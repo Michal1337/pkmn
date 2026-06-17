@@ -36,18 +36,24 @@ def _serve(req_q, conns, ack_q, net_config, device, int_keys, max_batch):
     net = build_net(enc.cf, enc.cards.vocab_size, net_config).to(dev).eval()
 
     def run_batch(grp, method):
-        keys = list(grp[0][2].keys())
-        batch = {k: torch.as_tensor(np.stack([it[2][k] for it in grp]),
-                                    dtype=(torch.long if k in int_keys else torch.float32),
-                                    device=dev) for k in keys}
-        with torch.no_grad():
-            if method == "lv":
-                out = net.logits_value(batch)[0]
-            else:
-                out = net.get_value(batch)
-        out = out.cpu().numpy()
-        for j, it in enumerate(grp):
-            conns[it[0]].send(out[j])
+        try:
+            keys = list(grp[0][2].keys())
+            batch = {k: torch.as_tensor(np.stack([it[2][k] for it in grp]),
+                                        dtype=(torch.long if k in int_keys else torch.float32),
+                                        device=dev) for k in keys}
+            with torch.no_grad():
+                out = (net.logits_value(batch)[0] if method == "lv" else net.get_value(batch))
+            out = out.cpu().numpy()
+            for j, it in enumerate(grp):
+                conns[it[0]].send(out[j])
+        except Exception:
+            # CRITICAL: never let one bad request kill the server and deadlock every
+            # worker. Send a sentinel (None); the client falls back to a random move.
+            for it in grp:
+                try:
+                    conns[it[0]].send(None)
+                except Exception:
+                    pass
 
     while True:
         items = [req_q.get()]
@@ -80,11 +86,12 @@ class ServerNet:
 
     def logits_value(self, encoded):
         self.req_q.put((self.cid, "lv", encoded))
-        return self.conn.recv()              # numpy [N_ACTIONS]
+        return self.conn.recv()              # numpy [N_ACTIONS], or None on server error
 
     def get_value(self, encoded):
         self.req_q.put((self.cid, "gv", encoded))
-        return float(self.conn.recv())
+        r = self.conn.recv()
+        return 0.0 if r is None else float(r)
 
 
 class InferenceServer:

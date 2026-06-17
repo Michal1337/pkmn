@@ -45,6 +45,11 @@ _CANDIDATES = [list(d) for d in DECKS.values()]
 _sample_deck = _load_sample_deck()
 if _sample_deck:
     _CANDIDATES.append(_sample_deck)
+try:    # generated archetypes -> match the --decks all+gen training pool (absent in the submission bundle, which stays at the 5 meta decks)
+    from .decks_generated import GENERATED
+    _CANDIDATES.extend(list(d) for d in GENERATED.values())
+except Exception:
+    pass
 
 
 def _net_greedy_select(obs, net, enc, device):

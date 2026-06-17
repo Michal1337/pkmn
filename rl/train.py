@@ -39,8 +39,11 @@ def resolve_deck_pool(name: str) -> list[list[int]]:
     sample = load_deck()  # engine sample deck (agent/deck.csv)
     if name == "all":
         return list(DECKS.values()) + [sample]
+    if name in ("gen", "all+gen") and not GENERATED:   # import failed -> don't silently shrink the pool
+        raise SystemExit("--decks gen/all+gen but rl/decks_generated.py is missing/empty "
+                         "(run scripts/build_decks.py)")
     if name == "gen":                                  # 50 generated archetypes
-        return list(GENERATED.values()) or [sample]
+        return list(GENERATED.values())
     if name == "all+gen":                              # official + sample + generated
         return list(DECKS.values()) + [sample] + list(GENERATED.values())
     if name == "official":
