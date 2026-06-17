@@ -117,6 +117,10 @@ def main():
 
     from .card_features import get_card_table
     from .decks import DECKS
+    try:
+        from .decks_generated import GENERATED
+    except Exception:
+        GENERATED = {}
     from .encoding import Encoder
     from .env import load_deck
     from .policy import build_net, load_compatible, obs_to_tensors
@@ -125,14 +129,20 @@ def main():
         deck_pool = [[int(l) for l in open(args.deck) if l.strip()]]
     elif args.decks == "all":
         deck_pool = list(DECKS.values()) + [load_deck()]
+    elif args.decks == "gen":
+        deck_pool = list(GENERATED.values()) or [load_deck()]
+    elif args.decks == "all+gen":
+        deck_pool = list(DECKS.values()) + [load_deck()] + list(GENERATED.values())
     elif args.decks == "official":
         deck_pool = list(DECKS.values())
     elif args.decks == "sample":
         deck_pool = [load_deck()]
     elif args.decks in DECKS:
         deck_pool = [DECKS[args.decks]]
+    elif args.decks in GENERATED:
+        deck_pool = [GENERATED[args.decks]]
     else:
-        raise SystemExit(f"unknown --decks '{args.decks}' (all|official|sample|{'|'.join(DECKS)})")
+        raise SystemExit(f"unknown --decks '{args.decks}' (all|gen|all+gen|official|sample|<name>)")
     print(f"[decks] pool={'file:'+args.deck if args.deck else args.decks} size={len(deck_pool)}", flush=True)
 
     # warm start (champion is MLP default arch); net_config carried for workers

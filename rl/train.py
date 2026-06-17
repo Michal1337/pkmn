@@ -24,6 +24,10 @@ import torch.optim as optim
 
 from .card_features import get_card_table
 from .decks import DECKS
+try:
+    from .decks_generated import GENERATED      # auto-generated archetype decks
+except Exception:
+    GENERATED = {}
 from .encoding import Encoder
 from .env import load_deck
 from .policy import build_net, load_compatible, obs_to_tensors
@@ -35,13 +39,19 @@ def resolve_deck_pool(name: str) -> list[list[int]]:
     sample = load_deck()  # engine sample deck (agent/deck.csv)
     if name == "all":
         return list(DECKS.values()) + [sample]
+    if name == "gen":                                  # 50 generated archetypes
+        return list(GENERATED.values()) or [sample]
+    if name == "all+gen":                              # official + sample + generated
+        return list(DECKS.values()) + [sample] + list(GENERATED.values())
     if name == "official":
         return list(DECKS.values())
     if name == "sample":
         return [sample]
     if name in DECKS:
         return [DECKS[name]]
-    raise SystemExit(f"unknown --decks '{name}' (use all|official|sample|{'|'.join(DECKS)})")
+    if name in GENERATED:
+        return [GENERATED[name]]
+    raise SystemExit(f"unknown --decks '{name}' (all|gen|all+gen|official|sample|<name>)")
 
 
 def parse_args():
