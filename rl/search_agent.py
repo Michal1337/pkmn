@@ -24,7 +24,27 @@ from .decks import DECKS
 from .encoding import MAX_OPTIONS, N_ACTIONS, SUBMIT_ACTION, build_mask
 from .policy import obs_to_tensors
 
-_CANDIDATES = [list(d) for d in DECKS.values()]   # known archetypes (deck inference)
+def _load_sample_deck():
+    """The engine 'sample' deck (agent/deck.csv) -- part of the meta/training pool but
+    not in DECKS. Bundle-safe: alongside this module in a submission, ../agent in repo."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(here, "deck.csv"), os.path.join(here, "..", "agent", "deck.csv")):
+        try:
+            if os.path.exists(p):
+                return [int(x) for x in open(p) if x.strip()]
+        except Exception:
+            pass
+    return None
+
+
+# Deck hypotheses for opponent inference: the known meta = official archetypes + the
+# engine sample deck (which is also the multi-deck training pool). Covers every deck an
+# opponent might play, so inference isn't forced into a same-archetype fallback.
+_CANDIDATES = [list(d) for d in DECKS.values()]
+_sample_deck = _load_sample_deck()
+if _sample_deck:
+    _CANDIDATES.append(_sample_deck)
 
 
 def _net_greedy_select(obs, net, enc, device):
