@@ -32,16 +32,16 @@ PPO_INIT=""; [ -n "$INIT_FROM" ] && PPO_INIT="--init-from $INIT_FROM"
 echo "[chain] PPO_OUT=$PPO_OUT"
 echo "[chain] AZ_OUT =$AZ_OUT   decks=$DECKS   warm=${INIT_FROM:-<fresh>}"
 
-# ---- 1) PPO self-play: 2 GPUs (learner cuda:0 + batched opponent server cuda:1),
-#         NENVS workers on dedicated cores ----
+# ---- 1) PPO self-play: 1 learner GPU + NENVS workers on dedicated cores. The opponent
+#         runs LOCALLY per worker (jit) -- a central inference server bottlenecked at
+#         scale (~2-3x slower at 64 workers), so no second GPU. ----
 JID=$(sbatch --parsable \
-  -A re-com -p "$GPU_PART" --gres=gpu:2 --cpus-per-task=$((NENVS + 12)) --mem=160G -t "${PPO_HOURS}:00:00" \
+  -A re-com -p "$GPU_PART" --gres=gpu:1 --cpus-per-task=$((NENVS + 12)) --mem=160G -t "${PPO_HOURS}:00:00" \
   --job-name=pkmn-ppo-chain --output="$HOME/pkmn_ppo_chain_%j.log" \
   --export=ALL,VENV=.venv-gpu,OUT="$PPO_OUT" \
   scripts/train_exp.sh --arch mlp --decks "$DECKS" --num-envs "$NENVS" \
     --total-timesteps 40000000 --selfplay-start 500000 \
-    --snapshot-every 200000 --save-every 250000 \
-    --device cuda:0 --server-device cuda:1 $PPO_INIT)
+    --snapshot-every 200000 --save-every 250000 --device cuda $PPO_INIT)
 echo "[chain] submitted PPO: job $JID"
 
 # ---- 2) AZ distill (CPU), starts after PPO TERMINATES (afterany: survives a PPO timeout,
