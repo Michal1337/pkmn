@@ -25,6 +25,7 @@ import random
 logging.disable(logging.CRITICAL)  # silence kaggle_environments import chatter
 
 from .encoding import Encoder, SUBMIT_ACTION, build_mask
+from .encoding2 import GameTracker, AbilityTracker
 from .card_features import get_card_table
 
 _AGENT_DECK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent", "deck.csv")
@@ -35,8 +36,10 @@ def load_deck(path: str = _AGENT_DECK) -> list[int]:
         return [int(line) for line in f if line.strip()]
 
 
-def random_opponent(raw_obs: dict, rng: random.Random) -> list[int]:
-    """Baseline opponent: a uniformly random legal selection (engine-native)."""
+def random_opponent(raw_obs: dict, rng: random.Random, **_) -> list[int]:
+    """Baseline opponent: a uniformly random legal selection (engine-native).
+
+    ``**_`` swallows the deck/tracker context the env passes to policy opponents."""
     sel = raw_obs["select"]
     n, k = len(sel["option"]), sel["maxCount"]
     return rng.sample(range(n), min(k, n)) if n else []
@@ -58,6 +61,7 @@ class CabtEnv:
         randomize_side: bool = True,     # alternate which player the agent is
         reward_shaping=None,             # (prev_state, new_state, agent_idx) -> float
         max_steps: int = 4000,
+        v2: bool = False,                # v2 token encoder: thread agent deck + a GameTracker
         seed: int | None = None,
     ):
         # A pool of decks (each side sampled per episode). Single-deck args are a
@@ -71,6 +75,21 @@ class CabtEnv:
         self.max_steps = max_steps
         self.rng = random.Random(seed)
 
+        self._v2 = v2
+        # SEPARATE per-side trackers, each fed ONLY that side's own decision obs -- because
+        # obs['logs'] is an incremental delta and, at Kaggle inference, an agent only ever
+        # receives the obs on its OWN turns (cabt interpreter writes logs to the player about
+        # to move). So each side sees only the *last* opponent sub-action's reveals; feeding a
+        # tracker every obs would over-inform it vs inference. Per-player attribution inside
+        # GameTracker lets each side read revealed_for(its opponent).
+        self._tracker = GameTracker() if v2 else None       # learner's view (reads opp's reveals)
+        self._opp_tracker = GameTracker() if v2 else None   # self-play opponent's view (reads learner's reveals)
+        self._last_tracked_obs = None                        # learner tracker updates once per new decision obs
+        # per-side ability-used memory (each fed only that side's own ABILITY picks)
+        self._ability = AbilityTracker() if v2 else None
+        self._opp_ability = AbilityTracker() if v2 else None
+        self._agent_deck: list[int] | None = None        # this episode's agent deck (for v2 decklist)
+        self._opp_deck: list[int] | None = None           # this episode's opponent deck (for the opponent's v2 encode)
         self._obs = None            # current raw engine obs
         self._picked: list[int] = []  # buffered picks for the current decision
         self._agent_idx = 0
@@ -93,13 +112,21 @@ class CabtEnv:
 
         self._agent_idx = self.rng.randint(0, 1) if self.randomize_side else 0
         agent_deck = self.rng.choice(self.agent_decks)      # sample decks this episode
+        self._agent_deck = agent_deck
         opp_deck = self.rng.choice(self.opponent_decks)
+        self._opp_deck = opp_deck
         d0 = agent_deck if self._agent_idx == 0 else opp_deck
         d1 = opp_deck if self._agent_idx == 0 else agent_deck
         obs, start = game.battle_start(d0, d1)
         if obs is None:
             raise RuntimeError(f"battle_start failed: errorPlayer={start.errorPlayer}")
 
+        if self._tracker is not None:
+            self._tracker.reset()
+            self._opp_tracker.reset()
+            self._ability.reset()
+            self._opp_ability.reset()
+        self._last_tracked_obs = None
         self._obs = obs
         self._picked = []
         self._steps = 0
@@ -166,6 +193,17 @@ class CabtEnv:
 
     # -- internals ----------------------------------------------------------
     def _encode(self):
+        if self._v2:
+            # fold THIS decision's logs into the learner tracker, once per new decision
+            # obs (buffering reuses the same obs -> guard on identity). This is exactly the
+            # obs the Kaggle submission's agent() receives, so train == test.
+            if self._tracker is not None and self._obs is not self._last_tracked_obs:
+                self._tracker.update(self._obs)
+                self._last_tracked_obs = self._obs
+            self._ability.note_turn((self._obs["current"] or {}).get("turn"))
+            return self.encoder.encode(self._obs, set(self._picked),
+                                       self_deck=self._agent_deck, tracker=self._tracker,
+                                       ability_slots=self._ability.slots)
         return self.encoder.encode(self._obs, set(self._picked))
 
     def _state(self):
@@ -175,6 +213,8 @@ class CabtEnv:
         """Submit the agent's selection; return (reward, terminated)."""
         game = self._engine()
         prev = self._state()
+        if self._ability is not None:                  # record OUR ability picks (sel before submit)
+            self._ability.record(self._obs["select"], indices)
         try:
             self._obs = game.battle_select(indices)
         except Exception:
@@ -198,7 +238,19 @@ class CabtEnv:
                 return
             if s["yourIndex"] == self._agent_idx:
                 return  # agent's decision
-            picks = self.opponent_fn(self._obs, self.rng)
+            # the opponent encodes from ITS own perspective: its true deck + its OWN trackers,
+            # fed only its decision obs (so it sees what it would at inference). It reads
+            # revealed_for(the learner) internally via the obs's yourIndex.
+            opp_slots = None
+            if self._opp_tracker is not None:
+                self._opp_tracker.update(self._obs)
+                self._opp_ability.note_turn((self._obs["current"] or {}).get("turn"))
+                opp_slots = self._opp_ability.slots
+            sel = self._obs["select"]
+            picks = self.opponent_fn(self._obs, self.rng, deck=self._opp_deck,
+                                     tracker=self._opp_tracker, ability_slots=opp_slots)
+            if self._opp_ability is not None:
+                self._opp_ability.record(sel, picks)
             try:
                 self._obs = game.battle_select(picks)
             except Exception:

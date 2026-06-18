@@ -29,8 +29,10 @@ try:
 except Exception:
     GENERATED = {}
 from .encoding import Encoder
+from .encoding2 import TokenEncoder
 from .env import load_deck
 from .policy import build_net, load_compatible, obs_to_tensors
+from .policy2 import build_token_net, obs_to_tensors2
 from .vec_env import SubprocVecEnv
 
 
@@ -85,7 +87,7 @@ def parse_args():
                         "or a named deck from rl.decks (e.g. mega_abomasnow)")
     p.add_argument("--no-randomize-side", action="store_true")
     # net (architecture)
-    p.add_argument("--arch", choices=["mlp", "transformer"], default="mlp")
+    p.add_argument("--arch", choices=["mlp", "transformer", "transformer2"], default="mlp")
     p.add_argument("--emb-dim", type=int, default=32)
     # mlp dims
     p.add_argument("--card-h", type=int, default=64)
@@ -121,13 +123,14 @@ def main():
     device = torch.device(args.device)
 
     ct = get_card_table()
-    enc = Encoder(ct)
-    if args.arch == "transformer":
-        net_config = {"arch": "transformer", "emb_dim": args.emb_dim, "d_model": args.d_model,
+    enc = TokenEncoder(ct) if args.arch == "transformer2" else Encoder(ct)
+    if args.arch in ("transformer", "transformer2"):
+        net_config = {"arch": args.arch, "emb_dim": args.emb_dim, "d_model": args.d_model,
                       "nhead": args.nhead, "nlayers": args.nlayers, "ff": args.ff}
     else:
         net_config = {"arch": "mlp", "emb_dim": args.emb_dim, "card_h": args.card_h,
                       "trunk_h": args.trunk_h, "opt_h": args.opt_h}
+    to_tensors = obs_to_tensors2 if args.arch == "transformer2" else obs_to_tensors
 
     pool = resolve_deck_pool(args.decks)
     print(f"[decks] pool='{args.decks}' -> {len(pool)} deck(s); both sides sampled per episode", flush=True)
@@ -140,7 +143,8 @@ def main():
     envs = SubprocVecEnv(args.num_envs, env_kwargs, net_config, base_seed=args.seed * 1000,
                          server_device=args.server_device)   # opponent inference batched here
 
-    net = build_net(enc.cf, ct.vocab_size, net_config).to(device)
+    net = (build_token_net(ct, net_config) if args.arch == "transformer2"
+           else build_net(enc.cf, ct.vocab_size, net_config)).to(device)
     opt = optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
     print(f"[net] params={sum(p.numel() for p in net.parameters()):,}", flush=True)
 
@@ -165,7 +169,7 @@ def main():
     global_step = 0
     start = time.time()
     next_obs_np, _ = envs.reset()
-    next_obs = obs_to_tensors(next_obs_np, device)
+    next_obs = to_tensors(next_obs_np, device)
     next_done = torch.zeros(args.num_envs, device=device)
 
     snapshot_pool = collections.deque(maxlen=args.pool_size)
@@ -199,7 +203,7 @@ def main():
 
             next_obs_np, reward, done, infos = envs.step(action.cpu().numpy())
             rewards[step] = torch.as_tensor(reward, device=device)
-            next_obs = obs_to_tensors(next_obs_np, device)
+            next_obs = to_tensors(next_obs_np, device)
             next_done = torch.as_tensor(done, dtype=torch.float32, device=device)
             for d, info in zip(done, infos):
                 if d and "terminal_reward" in info:

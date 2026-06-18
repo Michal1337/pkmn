@@ -56,7 +56,7 @@ def _play(net, device, opp_fn, agent_decks, opp_decks, games, seed):
     return w, d, l
 
 
-def first_opponent(raw_obs, rng):
+def first_opponent(raw_obs, rng, **_):
     """Deterministic baseline: take the first maxCount legal options."""
     sel = raw_obs["select"]
     n, k = len(sel["option"]), sel["maxCount"]
@@ -66,7 +66,7 @@ def first_opponent(raw_obs, rng):
 def make_self_opponent(net, enc, device):
     """Greedy mirror opponent driven by the same net (with multi-select buffering)."""
     @torch.no_grad()
-    def opp(raw_obs, rng):
+    def opp(raw_obs, rng, **_):
         sel = raw_obs["select"]
         picked: list[int] = []
         while True:

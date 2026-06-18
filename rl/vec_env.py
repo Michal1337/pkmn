@@ -23,24 +23,36 @@ def _policy_opponent_factory(net_config):
     """Worker-local opponent playing a frozen snapshot via a jit_wrap'd net (~1.7x CPU,
     independent per worker -> scales with cores). Returns (opponent_fn, set_weights)."""
     import torch
-    from rl.encoding import Encoder, SUBMIT_ACTION
     from rl.card_features import get_card_table
-    from rl.policy import build_net, jit_wrap
-
     torch.set_num_threads(1)
-    enc = Encoder(get_card_table())
+
+    v2 = net_config.get("arch") == "transformer2"
+    if v2:    # token transformer: the env threads the opponent's true deck + shared tracker; no jit (trace is fragile)
+        from rl.encoding2 import TokenEncoder
+        from rl.encoding import SUBMIT_ACTION
+        from rl.policy2 import build_token_net
+        enc = TokenEncoder(get_card_table())
+    else:
+        from rl.encoding import Encoder, SUBMIT_ACTION
+        from rl.policy import build_net, jit_wrap
+        enc = Encoder(get_card_table())
     state = {"net": None}
 
     def set_weights(sd):
         if sd is None:
             state["net"] = None
             return
-        net = build_net(enc.cf, enc.cards.vocab_size, net_config)
-        net.load_state_dict(sd); net.eval()
-        state["net"] = jit_wrap(net, enc)            # frozen TorchScript, ~1.7x
+        if v2:
+            net = build_token_net(enc.cards, net_config)
+            net.load_state_dict(sd); net.eval()
+            state["net"] = net                       # raw net (transformer doesn't jit-freeze cleanly)
+        else:
+            net = build_net(enc.cf, enc.cards.vocab_size, net_config)
+            net.load_state_dict(sd); net.eval()
+            state["net"] = jit_wrap(net, enc)        # frozen TorchScript, ~1.7x
 
     @torch.no_grad()
-    def opponent_fn(raw_obs, rng):
+    def opponent_fn(raw_obs, rng, deck=None, tracker=None, ability_slots=None):
         net = state["net"]
         sel = raw_obs["select"]
         if net is None:                              # random legal (warmup / no snapshot)
@@ -48,8 +60,11 @@ def _policy_opponent_factory(net_config):
             return rng.sample(range(n), min(k, n)) if n else []
         picked: list[int] = []
         while True:
+            enc_obs = (enc.encode(raw_obs, set(picked), self_deck=deck, tracker=tracker,
+                                  ability_slots=ability_slots)
+                       if v2 else enc.encode(raw_obs, set(picked)))
             o = {k: torch.as_tensor(v[None], dtype=(torch.long if k in enc.int_keys else torch.float32))
-                 for k, v in enc.encode(raw_obs, set(picked)).items()}
+                 for k, v in enc_obs.items()}
             logits, _ = net.logits_value(o)
             a = int(logits.argmax(-1).item())
             if a == SUBMIT_ACTION:
@@ -72,8 +87,13 @@ def _worker(remote, parent_remote, env_kwargs, net_config, seed):
     reward_shaping = prize_diff_shaping(0.1) if shaping == "prize_diff" else None
 
     opponent_fn, set_weights = _policy_opponent_factory(net_config)
-    env = CabtEnv(seed=seed, opponent_fn=opponent_fn,
-                  reward_shaping=reward_shaping, **env_kwargs)
+    encoder = None
+    if net_config.get("arch") == "transformer2":          # v2 token encoder for the learner side
+        from rl.encoding2 import TokenEncoder
+        from rl.card_features import get_card_table
+        encoder = TokenEncoder(get_card_table())
+    env = CabtEnv(seed=seed, opponent_fn=opponent_fn, reward_shaping=reward_shaping,
+                  encoder=encoder, v2=encoder is not None, **env_kwargs)
 
     try:
         while True:

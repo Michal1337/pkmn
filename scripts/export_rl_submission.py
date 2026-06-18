@@ -104,6 +104,61 @@ def SELECT(o):
 '''
 
 
+TRANSFORMER2_HEAD = '''\
+import torch
+from card_features import get_card_table
+from encoding import SUBMIT_ACTION
+from encoding2 import TokenEncoder, GameTracker, AbilityTracker
+from policy2 import build_token_net
+
+_DEVICE = torch.device("cpu")
+_CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
+_ENC = TokenEncoder(_CARDS)
+_CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
+_NET = build_token_net(_CARDS, _CK.get("net_config", {}))
+_NET.load_state_dict(_CK["net"])
+_NET.eval()
+
+# our true 60-card decklist (threaded as self_deck) + per-game reveal/ability memory.
+with open(os.path.join(_agent_dir(), "deck.csv")) as f:
+    DECK = [int(line) for line in f if line.strip()]
+_TRACKER = GameTracker()
+_ABILITY = AbilityTracker()
+
+
+@torch.no_grad()
+def _select(obs, picked):
+    o = _ENC.encode(obs, set(picked), self_deck=DECK, tracker=_TRACKER,
+                    ability_slots=_ABILITY.slots)
+    t = {k: torch.as_tensor(v[None], dtype=(torch.long if k in _ENC.int_keys else torch.float32),
+                            device=_DEVICE) for k, v in o.items()}
+    logits, _ = _NET.logits_value(t)
+    return int(logits.argmax(-1).item())
+
+
+def agent(obs):
+    sel = obs.get("select")
+    if sel is None:                       # engine asking for the deck == start of a new game
+        _TRACKER.reset(); _ABILITY.reset()
+        return DECK
+    # update memories ONCE per decision obs (NOT per buffered pick) -- exactly what the
+    # training env's learner does (decision-obs-only), so reveal/ability memory is train==test.
+    _ABILITY.note_turn((obs.get("current") or {}).get("turn"))
+    _TRACKER.update(obs)
+    picked = []
+    max_count = sel.get("maxCount", 1)
+    for _ in range(max_count + 1):        # buffer single picks into a full selection
+        a = _select(obs, picked)
+        if a == SUBMIT_ACTION:
+            break
+        picked.append(a)
+        if len(picked) >= max_count:
+            break
+    _ABILITY.record(sel, picked)          # remember OUR ability picks for later decisions this turn
+    return sorted(set(picked))
+'''
+
+
 MCTS_HEAD = '''\
 import random
 import torch
@@ -137,7 +192,8 @@ def copy_module(src_name, dst_path):
     """Copy an rl/ module to the flat bundle, fixing relative imports."""
     with open(os.path.join(RL, src_name), encoding="utf-8") as f:
         code = f.read()
-    for m in ("card_features", "encoding", "policy", "search_agent", "numpy_policy", "decks", "attack_data"):
+    for m in ("card_features", "encoding", "encoding2", "policy", "policy2",
+              "search_agent", "numpy_policy", "decks", "attack_data", "buff_data"):
         code = code.replace(f"from .{m} import", f"from {m} import")
     with open(dst_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -146,7 +202,7 @@ def copy_module(src_name, dst_path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ckpt", required=True)
-    p.add_argument("--backend", choices=["torch", "numpy", "mcts"], default="torch")
+    p.add_argument("--backend", choices=["torch", "numpy", "mcts", "transformer2"], default="torch")
     p.add_argument("--deck", default=os.path.join(ROOT, "agent", "deck.csv"))
     p.add_argument("--csv", default=os.path.join(ROOT, "EN_Card_Data.csv"))
     p.add_argument("--out", default=None)
@@ -172,6 +228,13 @@ def main():
         copy_module("policy.py", os.path.join(b, "policy.py"))
         torch.save(ck, os.path.join(b, "model.pt"))
         main_py = _DIR_FINDER + TORCH_HEAD + _AGENT_FN
+    elif args.backend == "transformer2":
+        # v2 token transformer: needs encoding2 (token streams + GameTracker) + policy2 + buff tables.
+        copy_module("encoding2.py", os.path.join(b, "encoding2.py"))
+        copy_module("policy2.py", os.path.join(b, "policy2.py"))
+        copy_module("buff_data.py", os.path.join(b, "buff_data.py"))
+        torch.save(ck, os.path.join(b, "model.pt"))
+        main_py = _DIR_FINDER + TRANSFORMER2_HEAD       # TRANSFORMER2_HEAD defines agent() itself
     elif args.backend == "mcts":
         copy_module("policy.py", os.path.join(b, "policy.py"))
         copy_module("decks.py", os.path.join(b, "decks.py"))      # candidate decklists

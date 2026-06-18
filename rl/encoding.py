@@ -230,12 +230,19 @@ class Encoder:
         """The SOURCE card an option acts on: explicit cardId, else the card at the
         option's (area,index) in its owner's zone (hand/deck/discard/active/bench).
         Previously deck-only -> now any zone, so PLAY/ATTACH/EVOLVE/ABILITY/DISCARD
-        options carry the actual card identity instead of just a positional index."""
+        options carry the actual card identity instead of just a positional index.
+
+        PLAY (type 7) options carry ONLY a bare ``index`` (a HAND position) with NO
+        ``area`` field -- without defaulting area to HAND they all resolve to 0, leaving
+        the policy blind to WHICH card it is playing (the most common option type)."""
         cid = o.get("cardId")
         if cid is not None:
             return cid
+        area = o.get("area")
+        if area is None and o.get("type") == 7:   # PLAY: index is a HAND slot (AreaType.HAND==2)
+            area = 2
         p = o.get("playerIndex")
-        return self._zone_card(s, o.get("area"), o.get("index"), me if p is None else p, deck_list)
+        return self._zone_card(s, area, o.get("index"), me if p is None else p, deck_list)
 
     def _resolve_target(self, o: dict, s, me) -> int:
         """The TARGET Pokemon an option affects: the in-play card at
