@@ -77,6 +77,7 @@ class Encoder:
             "stadium_static": (cf,), "stadium_id": (1,),
             "opt_dyn": (MAX_OPTIONS, 28),
             "opt_card_static": (MAX_OPTIONS, cf), "opt_card_id": (MAX_OPTIONS,),
+            "opt_tgt_static": (MAX_OPTIONS, cf), "opt_tgt_id": (MAX_OPTIONS,),
             "select_type": (1,), "select_context": (1,),
             "action_mask": (N_ACTIONS,),
         }
@@ -85,7 +86,7 @@ class Encoder:
     def int_keys(self):
         return {"self_active_id", "opp_active_id", "self_bench_id", "opp_bench_id",
                 "hand_id", "self_discard_id", "opp_discard_id",
-                "stadium_id", "opt_card_id", "select_type", "select_context"}
+                "stadium_id", "opt_card_id", "opt_tgt_id", "select_type", "select_context"}
 
     # ---- helpers ----------------------------------------------------------
     def _energy_hist(self, energies) -> np.ndarray:
@@ -177,19 +178,45 @@ class Encoder:
         ], dtype=np.float32)
         return dyn, self.cards.features(cid), cid
 
-    def _resolve_card(self, o: dict, deck_list) -> int:
-        """Card id an option refers to. Deck-search options carry no cardId; the
-        card is sel['deck'][index] (area==1, verified). Other zone refs (hand/
-        board) are already encoded elsewhere in the obs, so we leave them 0."""
+    def _zone_card(self, s, area, index, player, deck_list) -> int:
+        """Card id at (area, index) in `player`'s zone (cabt AreaType). 0 if unresolvable."""
+        if not isinstance(index, int) or index < 0:
+            return 0
+        if area == 1:                                   # DECK (visible via sel['deck'])
+            arr = deck_list
+        elif area == 7:                                 # STADIUM
+            arr = s.get("stadium")
+        elif area == 12:                                # LOOKING
+            arr = s.get("looking")
+        else:
+            zone = {2: "hand", 3: "discard", 4: "active", 5: "bench"}.get(area)
+            players = s.get("players") or []
+            if zone is None or not (0 <= player < len(players)):
+                return 0
+            arr = players[player].get(zone)
+        if not arr or index >= len(arr):
+            return 0
+        c = arr[index]
+        if c is None:
+            return 0
+        return (c.get("id") if isinstance(c, dict) else c) or 0
+
+    def _resolve_card(self, o: dict, s, me, deck_list) -> int:
+        """The SOURCE card an option acts on: explicit cardId, else the card at the
+        option's (area,index) in its owner's zone (hand/deck/discard/active/bench).
+        Previously deck-only -> now any zone, so PLAY/ATTACH/EVOLVE/ABILITY/DISCARD
+        options carry the actual card identity instead of just a positional index."""
         cid = o.get("cardId")
         if cid is not None:
             return cid
-        if deck_list is not None and o.get("area") == 1:
-            idx = o.get("index")
-            if isinstance(idx, int) and 0 <= idx < len(deck_list):
-                c = deck_list[idx]
-                return (c.get("id") if isinstance(c, dict) else c) or 0
-        return 0
+        p = o.get("playerIndex")
+        return self._zone_card(s, o.get("area"), o.get("index"), me if p is None else p, deck_list)
+
+    def _resolve_target(self, o: dict, s, me) -> int:
+        """The TARGET Pokemon an option affects: the in-play card at
+        (inPlayArea, inPlayIndex) -- e.g. which Pokemon gets the energy / evolves."""
+        p = o.get("playerIndex")
+        return self._zone_card(s, o.get("inPlayArea"), o.get("inPlayIndex"), me if p is None else p, None)
 
     # ---- main entry -------------------------------------------------------
     def encode(self, obs: dict, picked: set[int] | None = None) -> dict[str, np.ndarray]:
@@ -245,14 +272,21 @@ class Encoder:
         out["select_type"] = np.array([min(sel.get("type", 0), N_SELECT_TYPES - 1)], np.int64)
         out["select_context"] = np.array([min(sel.get("context", 0), N_SELECT_CTX - 1)], np.int64)
 
-        # options (resolve deck-search card identities)
+        # options: resolve each option's SOURCE card (any zone) + TARGET Pokemon, so the
+        # net scores by full content (which card / which target), not a positional index.
         deck_list = sel.get("deck") if isinstance(sel.get("deck"), list) else None
         opt_dyn = np.zeros((MAX_OPTIONS, 28), np.float32)
         opt_static = np.zeros((MAX_OPTIONS, self.cf), np.float32)
         opt_id = np.zeros(MAX_OPTIONS, np.int64)
+        opt_tgt_static = np.zeros((MAX_OPTIONS, self.cf), np.float32)
+        opt_tgt_id = np.zeros(MAX_OPTIONS, np.int64)
         for i, o in enumerate(sel["option"][:MAX_OPTIONS]):
-            opt_dyn[i], opt_static[i], opt_id[i] = self._option_row(o, self._resolve_card(o, deck_list))
+            src = self._resolve_card(o, s, me, deck_list)
+            opt_dyn[i], opt_static[i], opt_id[i] = self._option_row(o, src)
+            tgt = self._resolve_target(o, s, me)
+            opt_tgt_static[i], opt_tgt_id[i] = self.cards.features(tgt), tgt
         out["opt_dyn"], out["opt_card_static"], out["opt_card_id"] = opt_dyn, opt_static, opt_id
+        out["opt_tgt_static"], out["opt_tgt_id"] = opt_tgt_static, opt_tgt_id
 
         out["action_mask"] = build_mask(sel, picked)
         return out

@@ -23,7 +23,7 @@ from .encoding import MAX_OPTIONS, N_SELECT_TYPES, N_SELECT_CTX
 # Must match Encoder.int_keys.
 _INT_KEYS = {"self_active_id", "opp_active_id", "self_bench_id", "opp_bench_id",
              "hand_id", "self_discard_id", "opp_discard_id",
-             "stadium_id", "opt_card_id", "select_type", "select_context"}
+             "stadium_id", "opt_card_id", "opt_tgt_id", "select_type", "select_context"}
 
 
 def load_compatible(net, state_dict):
@@ -79,7 +79,7 @@ class ActorCritic(nn.Module):
         self.hand_enc = _mlp([card_h, card_h])
         self.disc_enc = _mlp([card_h, 64])                    # per-card discard, pooled
         self.stad_enc = _mlp([card_h, 64])
-        self.opt_enc = _mlp([card_h + 28, opt_h, opt_h])      # +opt_dyn(28)
+        self.opt_enc = _mlp([2 * card_h + 28, opt_h, opt_h])  # src card + tgt poke ++ opt_dyn(28)
 
         # global state vector -> trunk
         g_dim = (14 + 8 + 8           # scalars + select type/ctx emb
@@ -134,9 +134,10 @@ class ActorCritic(nn.Module):
         ], dim=-1)
         h = self.trunk(g)
 
-        # option representations (kept per-slot for scoring)
-        opt_c = self._cards(o["opt_card_static"], o["opt_card_id"])              # [B,64,card_h]
-        opt = self.opt_enc(torch.cat([opt_c, o["opt_dyn"]], dim=-1))            # [B,64,opt_h]
+        # option representations (per-slot): source card + target Pokemon + structural dyn
+        opt_c = self._cards(o["opt_card_static"], o["opt_card_id"])              # source card
+        opt_t = self._cards(o["opt_tgt_static"], o["opt_tgt_id"])               # target Pokemon
+        opt = self.opt_enc(torch.cat([opt_c, opt_t, o["opt_dyn"]], dim=-1))     # [B,K,opt_h]
         return h, opt
 
     def logits_value(self, o: dict):
@@ -273,8 +274,9 @@ class TransformerActorCritic(nn.Module):
             toks.append(d); pads.append(o[f"{side}_discard_mask"] < 0.5)
 
         # options (the action candidates)
-        oc = self._card_tok(o["opt_card_static"], o["opt_card_id"])
-        ot = oc + self.opt_dyn(o["opt_dyn"]) + self._type(B, oc.shape[1], _T_OPT, dev)
+        oc = self._card_tok(o["opt_card_static"], o["opt_card_id"])            # source card
+        otg = self._card_tok(o["opt_tgt_static"], o["opt_tgt_id"])             # target Pokemon
+        ot = oc + otg + self.opt_dyn(o["opt_dyn"]) + self._type(B, oc.shape[1], _T_OPT, dev)
         opt_present = o["opt_dyn"][..., :16].sum(-1) > 0            # a real option has a type one-hot
         n_opt = ot.shape[1]
         toks.append(ot); pads.append(~opt_present)
