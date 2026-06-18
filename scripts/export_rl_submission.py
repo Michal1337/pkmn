@@ -137,7 +137,7 @@ def copy_module(src_name, dst_path):
     """Copy an rl/ module to the flat bundle, fixing relative imports."""
     with open(os.path.join(RL, src_name), encoding="utf-8") as f:
         code = f.read()
-    for m in ("card_features", "encoding", "policy", "search_agent", "numpy_policy", "decks"):
+    for m in ("card_features", "encoding", "policy", "search_agent", "numpy_policy", "decks", "attack_data"):
         code = code.replace(f"from .{m} import", f"from {m} import")
     with open(dst_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -164,6 +164,7 @@ def main():
     # shared code + data
     copy_module("card_features.py", os.path.join(b, "card_features.py"))
     copy_module("encoding.py", os.path.join(b, "encoding.py"))
+    copy_module("attack_data.py", os.path.join(b, "attack_data.py"))  # per-attack props (encoding imports)
     shutil.copy(args.deck, os.path.join(b, "deck.csv"))
     shutil.copy(args.csv, os.path.join(b, "EN_Card_Data.csv"))
 

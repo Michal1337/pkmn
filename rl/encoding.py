@@ -28,6 +28,11 @@ import numpy as np
 
 from .card_features import CardTable, N_ENERGY, get_card_table
 
+try:    # per-attack properties (base_damage / is_variable / energy_cost / has_effect); bundle-safe
+    from .attack_data import ATTACKS as _ATTACKS
+except Exception:
+    _ATTACKS = {}
+
 # ---- shape constants (tune here) -------------------------------------------
 N_BENCH = 5          # bench slots (active is encoded separately)
 MAX_HAND = 20        # observed max hand ~17
@@ -42,6 +47,9 @@ N_SELECT_CTX = 64    # SelectContext embedding vocab cap
 
 SUBMIT_ACTION = MAX_OPTIONS  # the extra action index meaning "stop / submit set"
 N_ACTIONS = MAX_OPTIONS + 1
+
+# opt_dyn layout: 16 type one-hot + 12 structural + 4 attack(dmg/var/cost/effect) + 5 special-condition
+OPT_DYN = N_OPT_TYPES + 12 + 4 + 5
 
 # normalisation scales
 _T = 50.0; _CNT = 15.0; _DECK = 60.0; _PRIZE = 6.0; _DISCARD = 40.0
@@ -75,7 +83,7 @@ class Encoder:
             "self_discard_static": (MAX_DISCARD, cf), "self_discard_id": (MAX_DISCARD,), "self_discard_mask": (MAX_DISCARD,),
             "opp_discard_static": (MAX_DISCARD, cf), "opp_discard_id": (MAX_DISCARD,), "opp_discard_mask": (MAX_DISCARD,),
             "stadium_static": (cf,), "stadium_id": (1,),
-            "opt_dyn": (MAX_OPTIONS, 28),
+            "opt_dyn": (MAX_OPTIONS, OPT_DYN),
             "opt_card_static": (MAX_OPTIONS, cf), "opt_card_id": (MAX_OPTIONS,),
             "opt_tgt_static": (MAX_OPTIONS, cf), "opt_tgt_id": (MAX_OPTIONS,),
             "select_type": (1,), "select_context": (1,),
@@ -154,15 +162,30 @@ class Encoder:
             static[i] = self.cards.features(cid); ids[i] = cid; mask[i] = 1.0
         return static, ids, mask
 
+    def _attack_feats(self, o: dict) -> list[float]:
+        """ATTACK option -> [base_dmg/350, is_variable, energy_cost/5, has_effect]; zeros otherwise.
+        Variable/conditional damage is FLAGGED (not faked) -- the search/value head supply the
+        realized number by reading the resulting board."""
+        aid = o.get("attackId")
+        a = _ATTACKS.get(aid) if aid is not None else None
+        if a is None:
+            return [0.0, 0.0, 0.0, 0.0]
+        dmg, var, cost, eff = a
+        return [min(dmg, 350) / 350.0, float(var), min(cost, 5) / 5.0, float(eff)]
+
     def _option_row(self, o: dict, cid: int) -> tuple[np.ndarray, np.ndarray, int]:
-        """``cid`` is the option's resolved card id (0 if none)."""
+        """``cid`` is the option's resolved (source) card id (0 if none)."""
         cid = cid or 0
         t = np.zeros(N_OPT_TYPES, np.float32)
         ot = o.get("type", 0)
         if 0 <= ot < N_OPT_TYPES:
             t[ot] = 1.0
+        sc = [0.0] * 5                              # special-condition one-hot (poison..confuse)
+        sct = o.get("specialConditionType")
+        if isinstance(sct, int) and 0 <= sct < 5:
+            sc[sct] = 1.0
         dyn = np.array([
-            *t,                                    # 16
+            *t,                                    # 16  option type
             _f(o.get("area")) / _CNT,
             _f(o.get("index")) / _CNT,
             _f(o.get("playerIndex")),
@@ -174,7 +197,9 @@ class Encoder:
             1.0 if cid else 0.0,                   # references a known card
             1.0 if o.get("attackId") is not None else 0.0,
             1.0 if o.get("serial") is not None else 0.0,
-            _f(o.get("attackId")) / 2000.0,
+            _f(o.get("attackId")) / 2000.0,        # 12 structural
+            *self._attack_feats(o),                # 4   attack: dmg / variable / cost / effect
+            *sc,                                   # 5   special condition
         ], dtype=np.float32)
         return dyn, self.cards.features(cid), cid
 
@@ -275,7 +300,7 @@ class Encoder:
         # options: resolve each option's SOURCE card (any zone) + TARGET Pokemon, so the
         # net scores by full content (which card / which target), not a positional index.
         deck_list = sel.get("deck") if isinstance(sel.get("deck"), list) else None
-        opt_dyn = np.zeros((MAX_OPTIONS, 28), np.float32)
+        opt_dyn = np.zeros((MAX_OPTIONS, OPT_DYN), np.float32)
         opt_static = np.zeros((MAX_OPTIONS, self.cf), np.float32)
         opt_id = np.zeros(MAX_OPTIONS, np.int64)
         opt_tgt_static = np.zeros((MAX_OPTIONS, self.cf), np.float32)

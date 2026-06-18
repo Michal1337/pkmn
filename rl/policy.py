@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-from .encoding import MAX_OPTIONS, N_SELECT_TYPES, N_SELECT_CTX
+from .encoding import MAX_OPTIONS, N_SELECT_TYPES, N_SELECT_CTX, OPT_DYN
 
 # These keys are int64 id tensors; everything else is float32.
 # Must match Encoder.int_keys.
@@ -79,7 +79,7 @@ class ActorCritic(nn.Module):
         self.hand_enc = _mlp([card_h, card_h])
         self.disc_enc = _mlp([card_h, 64])                    # per-card discard, pooled
         self.stad_enc = _mlp([card_h, 64])
-        self.opt_enc = _mlp([2 * card_h + 28, opt_h, opt_h])  # src card + tgt poke ++ opt_dyn(28)
+        self.opt_enc = _mlp([2 * card_h + OPT_DYN, opt_h, opt_h])  # src + tgt card ++ opt_dyn
 
         # global state vector -> trunk
         g_dim = (14 + 8 + 8           # scalars + select type/ctx emb
@@ -220,7 +220,7 @@ class TransformerActorCritic(nn.Module):
         # projections -> d_model
         self.card_proj = nn.Linear(card_feat_dim + emb_dim, d_model)  # any card token
         self.poke_dyn = nn.Linear(18, d_model)                        # board dynamic feats
-        self.opt_dyn = nn.Linear(28, d_model)                         # option dynamic feats
+        self.opt_dyn = nn.Linear(OPT_DYN, d_model)                    # option dynamic feats
         self.disc_proj = nn.Linear(card_feat_dim, d_model)            # discard aggregate
         self.scalar_proj = nn.Linear(14, d_model)
         self.sel_type_emb = nn.Embedding(N_SELECT_TYPES, d_model)
@@ -277,7 +277,7 @@ class TransformerActorCritic(nn.Module):
         oc = self._card_tok(o["opt_card_static"], o["opt_card_id"])            # source card
         otg = self._card_tok(o["opt_tgt_static"], o["opt_tgt_id"])             # target Pokemon
         ot = oc + otg + self.opt_dyn(o["opt_dyn"]) + self._type(B, oc.shape[1], _T_OPT, dev)
-        opt_present = o["opt_dyn"][..., :16].sum(-1) > 0            # a real option has a type one-hot
+        opt_present = o["action_mask"][..., :MAX_OPTIONS] > 0.5     # legal options (robust to type-16)
         n_opt = ot.shape[1]
         toks.append(ot); pads.append(~opt_present)
 
