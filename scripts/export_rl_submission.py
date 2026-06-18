@@ -77,13 +77,12 @@ TORCH_HEAD = '''\
 import torch
 from card_features import get_card_table
 from encoding import Encoder, SUBMIT_ACTION
-from policy import ActorCritic, greedy_action
+from policy import build_net, greedy_action
 
 _DEVICE = torch.device("cpu")
 _CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
-_NET = ActorCritic(Encoder(get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))).cf,
-                   get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv")).vocab_size,
-                   **_CK.get("net_config", {}))
+_CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
+_NET = build_net(Encoder(_CARDS).cf, _CARDS.vocab_size, _CK.get("net_config", {}))  # dispatches on net_config['arch']
 _NET.load_state_dict(_CK["net"])
 _NET.eval()
 
