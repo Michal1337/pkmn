@@ -341,10 +341,11 @@ class GameTracker:
                 if mag:
                     self.opp_def_buff[lg["serial"]] = mag
             # WE played an offensive-buff trainer this turn -> our attacks do more THIS turn.
+            # ACCUMULATE (not max): these can be played multiple times in a turn, and the bonus stacks.
             elif t == 10 and lg.get("playerIndex") == me:
                 b = OFFENSE_BUFF_CARDS.get(lg.get("cardId"))
                 if b:
-                    self.offense_buff = max(self.offense_buff, b)
+                    self.offense_buff += b
         # (2) currently-visible public cards (both players' discard/board/stadium). Each visible
         # card is GROUND TRUTH for its zone, so it overrides any stale log-derived zone (a card
         # played out of hand re-appears here on board/discard and stops counting as in-hand).
@@ -739,12 +740,14 @@ class TokenEncoder:
             own_hand / 12.0,
             opp_hand / 12.0,
             # select-dynamics (what's going on in THIS decision): restore v1 parity
-            _f(sel.get("remainDamageCounter")) / 20.0,
-            _f(sel.get("remainEnergyCost")) / 5.0,
-            _f(sel.get("minCount")) / 3.0,
-            _f(sel.get("maxCount")) / 3.0,
-            len(picked) / 3.0,
-            (tracker.offense_buff if tracker is not None else 0.0) / 50.0,  # our this-turn attack buff
+            _f(sel.get("remainDamageCounter")) / 20.0,   # ceiling ~13 (Dusknoir); keep the larger scale
+            _f(sel.get("remainEnergyCost")) / 5.0,        # ceiling 5 (max attack cost) -> exactly 1.0
+            # counts: /5 (shared scale w/ energy cost; obs max maxCount=5 -> 1.0) + clamp, since
+            # maxCount is hard-capped at len(option) (~17 on detach-all-energy) -> bound the rare tail.
+            min(_f(sel.get("minCount")) / 5.0, 1.0),
+            min(_f(sel.get("maxCount")) / 5.0, 1.0),
+            min(len(picked) / 5.0, 1.0),
+            min((tracker.offense_buff if tracker is not None else 0.0) / 100.0, 1.0),  # our this-turn attack buff (stacks; /100 + clamp)
         ], dtype=np.float32)
         out["select_type"] = np.array([min(sel.get("type", 0), N_SELECT_TYPES - 1)], np.int64)
         out["select_context"] = np.array([min(sel.get("context", 0), N_SELECT_CTX - 1)], np.int64)

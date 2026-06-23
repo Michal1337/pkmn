@@ -60,6 +60,11 @@ _CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
 _NET = build_token_net(_CARDS, _CK.get("net_config", {}))
 _NET.load_state_dict(_CK["net"])
 _NET.eval()
+# net trained with the engine-sim would_ko feature? -> annotate it at inference too, so opt_attr's
+# would_ko column is populated exactly as in training (train==test). Else it would read all-zero.
+_WK_ON = bool(_CK.get("net_config", {}).get("would_ko"))
+if _WK_ON:
+    import search_agent2 as _SA2
 
 # our true 60-card decklist (threaded as self_deck) + per-game reveal/ability memory.
 with open(os.path.join(_agent_dir(), "deck.csv")) as f:
@@ -87,6 +92,8 @@ def agent(obs):
     # training env's learner does (decision-obs-only), so reveal/ability memory is train==test.
     _ABILITY.note_turn((obs.get("current") or {}).get("turn"))
     _TRACKER.update(obs)
+    if _WK_ON:                            # engine-sim KO per attack option, ONCE per decision (matches env)
+        _SA2.annotate_would_ko(obs, DECK, _ENC)
     picked = []
     max_count = sel.get("maxCount", 1)
     for _ in range(max_count + 1):        # buffer single picks into a full selection
@@ -115,6 +122,7 @@ _CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
 _NET = build_token_net(_CARDS, _CK.get("net_config", {}))
 _NET.load_state_dict(_CK["net"])
 _NET.eval()
+_WK_ON = bool(_CK.get("net_config", {}).get("would_ko"))   # annotate would_ko at inference iff trained with it
 _RNG = random.Random(0)
 _NSIMS = 40
 _NDET = 2
@@ -132,6 +140,8 @@ def agent(obs):
         return DECK
     _ABILITY.note_turn((obs.get("current") or {}).get("turn"))
     _TRACKER.update(obs)                  # decision-obs-only reveal memory (train==test)
+    if _WK_ON:                            # engine-sim KO on the ROOT attack options (train==test)
+        SA2.annotate_would_ko(obs, DECK, _ENC)
     pick = SA2.mcts_select(obs, _NET, _ENC, DECK, _TRACKER, _ABILITY.slots,
                            n_sims=_NSIMS, n_det=_NDET, rng=_RNG)
     _ABILITY.record(sel, pick)
@@ -182,16 +192,24 @@ def main():
     shutil.copy(args.deck, os.path.join(b, "deck.csv"))
     shutil.copy(args.csv, os.path.join(b, "EN_Card_Data.csv"))
 
-    if args.backend == "transformer2":
-        main_py = _DIR_FINDER + TRANSFORMER2_HEAD       # TRANSFORMER2_HEAD defines agent() itself
-    else:  # mcts2: search_agent2 reuses _determinize/_branchable/_Node from search_agent
-        # (net-agnostic primitives), so bundle both + decks (candidate decklists) + sdk_cg.
+    wk = bool(ck.get("net_config", {}).get("would_ko"))   # net trained with would_ko -> needs the engine-sim at inference
+
+    def _bundle_engine_sim():
+        # search_agent2 (MCTS + would_ko) reuses _determinize/_branchable/_Node from search_agent
+        # (net-agnostic primitives); bundle both + the candidate decklists + the sdk_cg forward model.
         copy_module("decks.py", os.path.join(b, "decks.py"))
         copy_module("search_agent.py", os.path.join(b, "search_agent.py"))
         copy_module("search_agent2.py", os.path.join(b, "search_agent2.py"))
         shutil.copytree(os.path.join(ROOT, "sdk_cg"), os.path.join(b, "sdk_cg"),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        main_py = (_DIR_FINDER + MCTS2_HEAD       # MCTS2_HEAD defines agent() itself
+
+    if args.backend == "transformer2":
+        if wk:                                            # greedy head annotates would_ko -> needs the sim
+            _bundle_engine_sim()
+        main_py = _DIR_FINDER + TRANSFORMER2_HEAD          # TRANSFORMER2_HEAD defines agent() itself
+    else:  # mcts2: always needs the engine-sim (MCTS + would_ko annotation of the root)
+        _bundle_engine_sim()
+        main_py = (_DIR_FINDER + MCTS2_HEAD               # MCTS2_HEAD defines agent() itself
                    .replace("_NSIMS = 40", f"_NSIMS = {args.n_sims}")
                    .replace("_NDET = 2", f"_NDET = {args.n_det}"))
 
