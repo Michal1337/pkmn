@@ -24,7 +24,7 @@ import random
 
 logging.disable(logging.CRITICAL)  # silence kaggle_environments import chatter
 
-from .encoding import Encoder, SUBMIT_ACTION, build_mask
+from .encoding import TokenEncoder, SUBMIT_ACTION, build_mask
 from .encoding import GameTracker, AbilityTracker
 from .card_features import get_card_table
 
@@ -57,12 +57,11 @@ class CabtEnv:
         agent_decks: list[list[int]] | None = None,    # POOL: sampled each episode
         opponent_decks: list[list[int]] | None = None,
         opponent_fn=None,                # (raw_obs, rng) -> list[int]; default random
-        encoder: Encoder | None = None,
+        encoder: TokenEncoder | None = None,
         randomize_side: bool = True,     # alternate which player the agent is
         reward_shaping=None,             # (prev_state, new_state, agent_idx) -> float
         max_steps: int = 4000,
-        v2: bool = False,                # v2 token encoder: thread agent deck + a GameTracker
-        would_ko: bool = False,          # v2: annotate engine-simulated would-KO per attack option
+        would_ko: bool = False,          # annotate engine-simulated would-KO per attack option
         seed: int | None = None,
     ):
         # A pool of decks (each side sampled per episode). Single-deck args are a
@@ -70,26 +69,25 @@ class CabtEnv:
         self.agent_decks = agent_decks or ([agent_deck] if agent_deck else [load_deck()])
         self.opponent_decks = opponent_decks or ([opponent_deck] if opponent_deck else list(self.agent_decks))
         self.opponent_fn = opponent_fn or random_opponent
-        self.encoder = encoder or Encoder(get_card_table())
+        self.encoder = encoder or TokenEncoder(get_card_table())
         self.randomize_side = randomize_side
         self.reward_shaping = reward_shaping
         self.max_steps = max_steps
         self.rng = random.Random(seed)
 
-        self._v2 = v2
-        self.would_ko = bool(would_ko) and v2             # engine-sim would-KO feature (v2 only)
+        self.would_ko = bool(would_ko)                    # engine-sim would-KO feature per attack option
         # SEPARATE per-side trackers, each fed ONLY that side's own decision obs -- because
         # obs['logs'] is an incremental delta and, at Kaggle inference, an agent only ever
         # receives the obs on its OWN turns (cabt interpreter writes logs to the player about
         # to move). So each side sees only the *last* opponent sub-action's reveals; feeding a
         # tracker every obs would over-inform it vs inference. Per-player attribution inside
         # GameTracker lets each side read revealed_for(its opponent).
-        self._tracker = GameTracker() if v2 else None       # learner's view (reads opp's reveals)
-        self._opp_tracker = GameTracker() if v2 else None   # self-play opponent's view (reads learner's reveals)
+        self._tracker = GameTracker()                        # learner's view (reads opp's reveals)
+        self._opp_tracker = GameTracker()                    # self-play opponent's view (reads learner's reveals)
         self._last_tracked_obs = None                        # learner tracker updates once per new decision obs
         # per-side ability-used memory (each fed only that side's own ABILITY picks)
-        self._ability = AbilityTracker() if v2 else None
-        self._opp_ability = AbilityTracker() if v2 else None
+        self._ability = AbilityTracker()
+        self._opp_ability = AbilityTracker()
         self._agent_deck: list[int] | None = None        # this episode's agent deck (for v2 decklist)
         self._opp_deck: list[int] | None = None           # this episode's opponent deck (for the opponent's v2 encode)
         self._obs = None            # current raw engine obs
@@ -201,21 +199,19 @@ class CabtEnv:
 
     # -- internals ----------------------------------------------------------
     def _encode(self):
-        if self._v2:
-            # fold THIS decision's logs into the learner tracker, once per new decision
-            # obs (buffering reuses the same obs -> guard on identity). This is exactly the
-            # obs the Kaggle submission's agent() receives, so train == test.
-            if self._tracker is not None and self._obs is not self._last_tracked_obs:
-                self._tracker.update(self._obs)
-                if self.would_ko:                         # engine-sim KO per attack option (once/decision)
-                    from rl import search_agent2 as _SA2
-                    _SA2.annotate_would_ko(self._obs, self._agent_deck, self.encoder)
-                self._last_tracked_obs = self._obs
-            self._ability.note_turn((self._obs["current"] or {}).get("turn"))
-            return self.encoder.encode(self._obs, set(self._picked),
-                                       self_deck=self._agent_deck, tracker=self._tracker,
-                                       ability_slots=self._ability.slots)
-        return self.encoder.encode(self._obs, set(self._picked))
+        # fold THIS decision's logs into the learner tracker, once per new decision
+        # obs (buffering reuses the same obs -> guard on identity). This is exactly the
+        # obs the Kaggle submission's agent() receives, so train == test.
+        if self._obs is not self._last_tracked_obs:
+            self._tracker.update(self._obs)
+            if self.would_ko:                         # engine-sim KO per attack option (once/decision)
+                from rl import search_agent2 as _SA2
+                _SA2.annotate_would_ko(self._obs, self._agent_deck, self.encoder)
+            self._last_tracked_obs = self._obs
+        self._ability.note_turn((self._obs["current"] or {}).get("turn"))
+        return self.encoder.encode(self._obs, set(self._picked),
+                                   self_deck=self._agent_deck, tracker=self._tracker,
+                                   ability_slots=self._ability.slots)
 
     def _state(self):
         return self._obs["current"]

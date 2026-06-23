@@ -130,41 +130,30 @@ def make_ai(ckpt, mode, n_sims, n_det, deck_holder):
     ck = torch.load(ckpt, map_location="cpu")
     arch = ck.get("net_config", {}).get("arch", "mlp")
     cards = get_card_table()
-    if arch == "transformer2":
-        from rl.encoding import TokenEncoder, GameTracker, AbilityTracker
-        from rl.policy2 import build_token_net
-        from rl.policy import load_compatible
-        from rl import search_agent2 as SA
-        enc = TokenEncoder(cards)
-        net = build_token_net(cards, ck["net_config"]); load_compatible(net, ck["net"]); net.eval()
-        tr, ab = GameTracker(), AbilityTracker()
-        wk_on = bool(ck.get("net_config", {}).get("would_ko"))   # net trained with the would_KO feature?
+    if arch != "transformer2":
+        raise SystemExit(f"checkpoint arch {arch!r} unsupported -- the v1 mlp/transformer nets were "
+                         f"removed; use a transformer2 checkpoint")
+    from rl.encoding import TokenEncoder, GameTracker, AbilityTracker
+    from rl.policy2 import build_token_net
+    from rl.policy import load_compatible
+    from rl import search_agent2 as SA
+    enc = TokenEncoder(cards)
+    net = build_token_net(cards, ck["net_config"]); load_compatible(net, ck["net"]); net.eval()
+    tr, ab = GameTracker(), AbilityTracker()
+    wk_on = bool(ck.get("net_config", {}).get("would_ko"))       # net trained with the would_KO feature?
 
-        def ai(obs):
-            sel = obs.get("select")
-            if sel is None:
-                tr.reset(); ab.reset(); return [int(c) for c in deck_holder["deck"]]
-            tr.update(obs); ab.note_turn((obs.get("current") or {}).get("turn"))
-            if mode == "mcts":
-                pick = SA.mcts_select(obs, net, enc, deck_holder["deck"], tr, ab.slots, n_sims=n_sims, n_det=n_det)
-            else:                                            # greedy (annotate would_KO feature iff net trained w/ it)
-                if wk_on:
-                    SA.annotate_would_ko(obs, deck_holder["deck"], enc)
-                pick = SA._net_greedy_select(obs, net, enc, deck_holder["deck"], tr, ab.slots)
-            ab.record(sel, pick); return pick
-    else:
-        from rl.encoding import Encoder
-        from rl.policy import build_net, load_compatible
-        from rl import search_agent as SA
-        enc = Encoder(cards)
-        net = build_net(enc.cf, cards.vocab_size, ck.get("net_config", {})); load_compatible(net, ck["net"]); net.eval()
-
-        def ai(obs):
-            sel = obs.get("select")
-            if sel is None:
-                return [int(c) for c in deck_holder["deck"]]
-            return (SA.mcts_select(obs, net, enc, deck_holder["deck"], "cpu", n_sims=n_sims, n_det=n_det)
-                    if mode == "mcts" else SA._net_greedy_select(obs, net, enc, "cpu"))
+    def ai(obs):
+        sel = obs.get("select")
+        if sel is None:
+            tr.reset(); ab.reset(); return [int(c) for c in deck_holder["deck"]]
+        tr.update(obs); ab.note_turn((obs.get("current") or {}).get("turn"))
+        if mode == "mcts":
+            pick = SA.mcts_select(obs, net, enc, deck_holder["deck"], tr, ab.slots, n_sims=n_sims, n_det=n_det)
+        else:                                                    # greedy (annotate would_KO feature iff net trained w/ it)
+            if wk_on:
+                SA.annotate_would_ko(obs, deck_holder["deck"], enc)
+            pick = SA._net_greedy_select(obs, net, enc, deck_holder["deck"], tr, ab.slots)
+        ab.record(sel, pick); return pick
     return ai, arch
 
 

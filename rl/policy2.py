@@ -104,7 +104,7 @@ def obs_to_tensors2(obs: dict, device) -> dict:
 class TokenTransformer(nn.Module):
     """Token-set state -> Transformer encoder -> pointer policy + CLS value.
 
-    Same interface as policy.ActorCritic / TransformerActorCritic.
+    Interface: logits_value / get_value / get_action_and_value.
     """
 
     def __init__(self, vocab_size: int, emb_dim: int = 48, d_model: int = 128,

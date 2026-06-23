@@ -30,10 +30,9 @@ try:
     from .decks_generated import GENERATED      # auto-generated archetype decks
 except Exception:
     GENERATED = {}
-from .encoding import Encoder
 from .encoding import TokenEncoder
 from .env import load_deck
-from .policy import build_net, load_compatible, obs_to_tensors
+from .policy import load_compatible
 from .policy2 import build_token_net, obs_to_tensors2
 from .vec_env import SubprocVecEnv
 
@@ -98,7 +97,7 @@ def parse_args():
                         "or a named deck from rl.decks (e.g. mega_abomasnow)")
     p.add_argument("--no-randomize-side", action="store_true")
     # net (architecture)
-    p.add_argument("--arch", choices=["mlp", "transformer", "transformer2"], default="mlp")
+    p.add_argument("--arch", choices=["transformer2"], default="transformer2")  # v1 mlp/transformer removed
     p.add_argument("--static", action="store_true", help="transformer2: feed static per-card features (HP/type/cost/...) into the net")
     p.add_argument("--would-ko", action=argparse.BooleanOptionalAction, default=True,
                    help="transformer2: annotate engine-simulated would-KO per attack option (DEFAULT ON; "
@@ -170,15 +169,11 @@ def main():
     np.random.seed(args.seed + rank)
 
     ct = get_card_table()
-    enc = TokenEncoder(ct) if args.arch == "transformer2" else Encoder(ct)
-    if args.arch in ("transformer", "transformer2"):
-        net_config = {"arch": args.arch, "emb_dim": args.emb_dim, "d_model": args.d_model,
-                      "nhead": args.nhead, "nlayers": args.nlayers, "ff": args.ff,
-                      "static": args.static, "would_ko": args.would_ko}
-    else:
-        net_config = {"arch": "mlp", "emb_dim": args.emb_dim, "card_h": args.card_h,
-                      "trunk_h": args.trunk_h, "opt_h": args.opt_h}
-    to_tensors = obs_to_tensors2 if args.arch == "transformer2" else obs_to_tensors
+    enc = TokenEncoder(ct)
+    net_config = {"arch": "transformer2", "emb_dim": args.emb_dim, "d_model": args.d_model,
+                  "nhead": args.nhead, "nlayers": args.nlayers, "ff": args.ff,
+                  "static": args.static, "would_ko": args.would_ko}
+    to_tensors = obs_to_tensors2
 
     pool = resolve_deck_pool(args.decks)
     print(f"[decks] pool='{args.decks}' -> {len(pool)} deck(s); both sides sampled per episode", flush=True)
@@ -195,8 +190,7 @@ def main():
     envs = SubprocVecEnv(args.num_envs, env_kwargs, net_config, base_seed=args.seed * 1000,
                          server_device=srv_dev, opponent_mode=args.opponent_mode)
 
-    net = (build_token_net(ct, net_config) if args.arch == "transformer2"
-           else build_net(enc.cf, ct.vocab_size, net_config)).to(device)
+    net = build_token_net(ct, net_config).to(device)
     if ddp:                                              # identical initial weights across ranks
         for p in net.parameters():
             dist.broadcast(p.data, src=0)
@@ -348,8 +342,7 @@ def main():
     behavior_net = None
     if args.async_collect:
         # frozen behavior-policy clone for the background collector (no race with the optimizer)
-        behavior_net = (build_token_net(ct, net_config) if args.arch == "transformer2"
-                        else build_net(enc.cf, ct.vocab_size, net_config)).to(collector_device)
+        behavior_net = build_token_net(ct, net_config).to(collector_device)
         behavior_net.load_state_dict(net.state_dict())
         behavior_net.eval()
         if is_main:

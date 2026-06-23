@@ -1,19 +1,18 @@
 """Export a trained checkpoint into a Kaggle submission tarball.
 
-Two backends:
-  --backend torch  (default): bundles policy.py + the raw checkpoint (model.pt)
-      and runs torch inference. Smaller/simpler, BUT requires the Kaggle cabt
-      runtime to have torch installed.
-  --backend numpy: bundles model.npz + numpy_policy.py and runs a pure-numpy
-      forward pass. Torch-free, runs anywhere numpy exists. Use if torch is
-      unavailable on the runtime.
+Two backends (both v2 token-transformer; the v1 mlp torch/numpy/mcts backends were removed):
+  --backend transformer2 (default): greedy policy -- bundles policy2.py + the raw
+      checkpoint (model.pt) and runs torch inference. Requires torch on the runtime.
+  --backend mcts2: decision-time PUCT MCTS (search_agent2) on top of the v2 net --
+      additionally bundles search_agent/search_agent2 + decks + the sdk_cg forward model.
 
 Archive top-level contents (flat, as Kaggle requires):
-    main.py  deck.csv  EN_Card_Data.csv  card_features.py  encoding.py
-    + (torch) policy.py  model.pt      OR      + (numpy) numpy_policy.py  model.npz
+    main.py  deck.csv  EN_Card_Data.csv  card_features.py  enc_constants.py
+    encoding.py  attack_data.py  policy2.py  buff_data.py  model.pt
+    (+ mcts2: search_agent.py  search_agent2.py  decks.py  sdk_cg/)
 
-    python scripts/export_rl_submission.py --ckpt path/to/latest.pt            # torch
-    python scripts/export_rl_submission.py --ckpt path/to/latest.pt --backend numpy
+    python scripts/export_rl_submission.py --ckpt path/to/latest.pt                 # transformer2 (greedy)
+    python scripts/export_rl_submission.py --ckpt path/to/latest.pt --backend mcts2 # + MCTS
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import os
 import shutil
 import tarfile
 
-import numpy as np
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,62 +43,6 @@ def _agent_dir():
 
 _HERE = _agent_dir()
 sys.path.insert(0, _HERE)
-'''
-
-_AGENT_FN = '''\
-
-with open(os.path.join(_HERE, "deck.csv")) as f:
-    DECK = [int(line) for line in f if line.strip()]
-
-CARDS = get_card_table(os.path.join(_HERE, "EN_Card_Data.csv"))
-ENC = Encoder(CARDS)
-
-
-def agent(obs):
-    sel = obs.get("select")
-    if sel is None:                       # engine asking for the deck
-        return DECK
-    picked = []
-    max_count = sel.get("maxCount", 1)
-    for _ in range(max_count + 1):        # buffer single picks into a full selection
-        o = ENC.encode(obs, set(picked))
-        a = SELECT(o)
-        if a == SUBMIT_ACTION:
-            break
-        picked.append(a)
-        if len(picked) >= max_count:
-            break
-    return sorted(set(picked))
-'''
-
-TORCH_HEAD = '''\
-import torch
-from card_features import get_card_table
-from encoding import Encoder, SUBMIT_ACTION
-from policy import build_net, greedy_action
-
-_DEVICE = torch.device("cpu")
-_CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
-_CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
-_NET = build_net(Encoder(_CARDS).cf, _CARDS.vocab_size, _CK.get("net_config", {}))  # dispatches on net_config['arch']
-_NET.load_state_dict(_CK["net"])
-_NET.eval()
-
-
-def SELECT(o):
-    return greedy_action(_NET, o, _DEVICE)
-'''
-
-NUMPY_HEAD = '''\
-from card_features import get_card_table
-from encoding import Encoder, SUBMIT_ACTION
-from numpy_policy import NumpyPolicy
-
-_POLICY = NumpyPolicy(os.path.join(_agent_dir(), "model.npz"))
-
-
-def SELECT(o):
-    return _POLICY.select(o)
 '''
 
 
@@ -159,35 +101,6 @@ def agent(obs):
 '''
 
 
-MCTS_HEAD = '''\
-import random
-import torch
-from card_features import get_card_table
-from encoding import Encoder, SUBMIT_ACTION
-from policy import build_net
-import search_agent
-
-_CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
-_ENC = Encoder(_CARDS)
-_CK = torch.load(os.path.join(_agent_dir(), "model.pt"), map_location="cpu")
-_NET = build_net(_ENC.cf, _CARDS.vocab_size, _CK.get("net_config", {}))
-_NET.load_state_dict(_CK["net"])
-_NET.eval()
-_RNG = random.Random(0)
-_NSIMS = 40
-_NDET = 2
-
-with open(os.path.join(_agent_dir(), "deck.csv")) as f:
-    DECK = [int(line) for line in f if line.strip()]
-
-
-def agent(obs):
-    # mcts_select handles the deck step (select None) and non-searchable selects.
-    return search_agent.mcts_select(obs, _NET, _ENC, DECK, "cpu",
-                                    n_sims=_NSIMS, n_det=_NDET, rng=_RNG)
-'''
-
-
 MCTS2_HEAD = '''\
 import random
 import torch
@@ -230,8 +143,8 @@ def copy_module(src_name, dst_path):
     """Copy an rl/ module to the flat bundle, fixing relative imports."""
     with open(os.path.join(RL, src_name), encoding="utf-8") as f:
         code = f.read()
-    for m in ("card_features", "encoding", "policy", "policy2",
-              "search_agent", "numpy_policy", "decks", "attack_data", "buff_data"):
+    for m in ("card_features", "enc_constants", "encoding", "attack_data", "buff_data",
+              "policy2", "search_agent", "search_agent2", "decks"):
         code = code.replace(f"from .{m} import", f"from {m} import")
     with open(dst_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -240,12 +153,12 @@ def copy_module(src_name, dst_path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ckpt", required=True)
-    p.add_argument("--backend", choices=["torch", "numpy", "mcts", "transformer2", "mcts2"], default="torch")
+    p.add_argument("--backend", choices=["transformer2", "mcts2"], default="transformer2")
     p.add_argument("--deck", default=os.path.join(ROOT, "agent", "deck.csv"))
     p.add_argument("--csv", default=os.path.join(ROOT, "EN_Card_Data.csv"))
     p.add_argument("--out", default=None)
     p.add_argument("--builddir", default=None)
-    p.add_argument("--n-sims", type=int, default=40, help="MCTS sims/move (mcts/mcts2 heads)")
+    p.add_argument("--n-sims", type=int, default=40, help="MCTS sims/move (mcts2 head)")
     p.add_argument("--n-det", type=int, default=2, help="MCTS determinizations/move")
     args = p.parse_args()
 
@@ -257,51 +170,30 @@ def main():
 
     ck = torch.load(args.ckpt, map_location="cpu")
 
-    # shared code + data
+    # shared code + data (the v2 token encoder: encoding.py imports shape constants from
+    # enc_constants.py + per-attack props from attack_data.py + buff tables from buff_data.py).
     copy_module("card_features.py", os.path.join(b, "card_features.py"))
+    copy_module("enc_constants.py", os.path.join(b, "enc_constants.py"))
     copy_module("encoding.py", os.path.join(b, "encoding.py"))
-    copy_module("attack_data.py", os.path.join(b, "attack_data.py"))  # per-attack props (encoding imports)
+    copy_module("attack_data.py", os.path.join(b, "attack_data.py"))
+    copy_module("buff_data.py", os.path.join(b, "buff_data.py"))
+    copy_module("policy2.py", os.path.join(b, "policy2.py"))
+    torch.save(ck, os.path.join(b, "model.pt"))
     shutil.copy(args.deck, os.path.join(b, "deck.csv"))
     shutil.copy(args.csv, os.path.join(b, "EN_Card_Data.csv"))
 
-    if args.backend == "torch":
-        copy_module("policy.py", os.path.join(b, "policy.py"))
-        torch.save(ck, os.path.join(b, "model.pt"))
-        main_py = _DIR_FINDER + TORCH_HEAD + _AGENT_FN
-    elif args.backend == "transformer2":
-        # v2 token transformer: token streams + GameTracker live in encoding.py (always copied above); + policy2 + buff tables.
-        copy_module("policy2.py", os.path.join(b, "policy2.py"))
-        copy_module("buff_data.py", os.path.join(b, "buff_data.py"))
-        torch.save(ck, os.path.join(b, "model.pt"))
+    if args.backend == "transformer2":
         main_py = _DIR_FINDER + TRANSFORMER2_HEAD       # TRANSFORMER2_HEAD defines agent() itself
-    elif args.backend == "mcts":
-        copy_module("policy.py", os.path.join(b, "policy.py"))
-        copy_module("decks.py", os.path.join(b, "decks.py"))      # candidate decklists
-        copy_module("search_agent.py", os.path.join(b, "search_agent.py"))
-        torch.save(ck, os.path.join(b, "model.pt"))
-        shutil.copytree(os.path.join(ROOT, "sdk_cg"), os.path.join(b, "sdk_cg"),
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        main_py = _DIR_FINDER + MCTS_HEAD       # MCTS_HEAD defines agent() itself
-    elif args.backend == "mcts2":
-        # v2 token transformer + search_agent2 MCTS. search_agent2 imports _determinize/
-        # _branchable/_Node from search_agent, which imports obs_to_tensors from policy -> bundle both.
-        copy_module("policy2.py", os.path.join(b, "policy2.py"))
-        copy_module("buff_data.py", os.path.join(b, "buff_data.py"))
-        copy_module("policy.py", os.path.join(b, "policy.py"))
+    else:  # mcts2: search_agent2 reuses _determinize/_branchable/_Node from search_agent
+        # (net-agnostic primitives), so bundle both + decks (candidate decklists) + sdk_cg.
         copy_module("decks.py", os.path.join(b, "decks.py"))
         copy_module("search_agent.py", os.path.join(b, "search_agent.py"))
         copy_module("search_agent2.py", os.path.join(b, "search_agent2.py"))
-        torch.save(ck, os.path.join(b, "model.pt"))
         shutil.copytree(os.path.join(ROOT, "sdk_cg"), os.path.join(b, "sdk_cg"),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         main_py = (_DIR_FINDER + MCTS2_HEAD       # MCTS2_HEAD defines agent() itself
                    .replace("_NSIMS = 40", f"_NSIMS = {args.n_sims}")
                    .replace("_NDET = 2", f"_NDET = {args.n_det}"))
-    else:
-        copy_module("numpy_policy.py", os.path.join(b, "numpy_policy.py"))
-        np.savez(os.path.join(b, "model.npz"),
-                 **{k: v.cpu().numpy() for k, v in ck["net"].items()})
-        main_py = _DIR_FINDER + NUMPY_HEAD + _AGENT_FN
 
     with open(os.path.join(b, "main.py"), "w", encoding="utf-8") as f:
         f.write(main_py)

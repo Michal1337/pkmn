@@ -39,22 +39,16 @@ import numpy as np
 
 
 def _policy_opponent_factory(net_config):
-    """Worker-local opponent playing a frozen snapshot via a jit_wrap'd net (~1.7x CPU,
-    independent per worker -> scales with cores). Returns (opponent_fn, set_weights)."""
+    """Worker-local opponent playing a frozen snapshot of the v2 net (raw, not jit-frozen --
+    the token transformer doesn't trace cleanly). Returns (opponent_fn, set_weights)."""
     import torch
     from rl.card_features import get_card_table
     torch.set_num_threads(1)
 
-    v2 = net_config.get("arch") == "transformer2"
-    if v2:    # token transformer: the env threads the opponent's true deck + shared tracker; no jit (trace is fragile)
-        from rl.encoding import TokenEncoder
-        from rl.encoding import SUBMIT_ACTION
-        from rl.policy2 import build_token_net
-        enc = TokenEncoder(get_card_table())
-    else:
-        from rl.encoding import Encoder, SUBMIT_ACTION
-        from rl.policy import build_net, jit_wrap
-        enc = Encoder(get_card_table())
+    # token transformer: the env threads the opponent's true deck + shared tracker; no jit (trace is fragile)
+    from rl.encoding import TokenEncoder, SUBMIT_ACTION
+    from rl.policy2 import build_token_net
+    enc = TokenEncoder(get_card_table())
     state = {"net": None}
 
     def set_weights(sd):
@@ -62,14 +56,9 @@ def _policy_opponent_factory(net_config):
             state["net"] = None
             return
         sd = {k: torch.as_tensor(v) for k, v in sd.items()}   # numpy (from the pipe) -> tensors
-        if v2:
-            net = build_token_net(enc.cards, net_config)
-            net.load_state_dict(sd); net.eval()
-            state["net"] = net                       # raw net (transformer doesn't jit-freeze cleanly)
-        else:
-            net = build_net(enc.cf, enc.cards.vocab_size, net_config)
-            net.load_state_dict(sd); net.eval()
-            state["net"] = jit_wrap(net, enc)        # frozen TorchScript, ~1.7x
+        net = build_token_net(enc.cards, net_config)
+        net.load_state_dict(sd); net.eval()
+        state["net"] = net                           # raw net (transformer doesn't jit-freeze cleanly)
 
     @torch.no_grad()
     def opponent_fn(raw_obs, rng, deck=None, tracker=None, ability_slots=None):
@@ -80,9 +69,8 @@ def _policy_opponent_factory(net_config):
             return rng.sample(range(n), min(k, n)) if n else []
         picked: list[int] = []
         while True:
-            enc_obs = (enc.encode(raw_obs, set(picked), self_deck=deck, tracker=tracker,
-                                  ability_slots=ability_slots)
-                       if v2 else enc.encode(raw_obs, set(picked)))
+            enc_obs = enc.encode(raw_obs, set(picked), self_deck=deck, tracker=tracker,
+                                 ability_slots=ability_slots)
             o = {k: torch.as_tensor(v[None], dtype=(torch.long if k in enc.int_keys else torch.float32))
                  for k, v in enc_obs.items()}
             logits, _ = net.logits_value(o)
@@ -117,14 +105,8 @@ def _server_opponent_factory(net_config, opp_remote, srv):
     from rl.card_features import get_card_table
     torch.set_num_threads(1)
 
-    v2 = net_config.get("arch") == "transformer2"
-    if v2:
-        from rl.encoding import TokenEncoder
-        from rl.encoding import SUBMIT_ACTION
-        enc = TokenEncoder(get_card_table())
-    else:
-        from rl.encoding import Encoder, SUBMIT_ACTION
-        enc = Encoder(get_card_table())
+    from rl.encoding import TokenEncoder, SUBMIT_ACTION
+    enc = TokenEncoder(get_card_table())
 
     idx, n = srv["idx"], srv["n"]
     shms = {k: _attach_shm(name) for k, name in srv["names"].items()}
@@ -151,9 +133,8 @@ def _server_opponent_factory(net_config, opp_remote, srv):
             return _random(sel, rng)
         picked: list[int] = []
         while True:
-            enc_obs = (enc.encode(raw_obs, set(picked), self_deck=deck, tracker=tracker,
-                                  ability_slots=ability_slots)
-                       if v2 else enc.encode(raw_obs, set(picked)))
+            enc_obs = enc.encode(raw_obs, set(picked), self_deck=deck, tracker=tracker,
+                                 ability_slots=ability_slots)
             for k, v in enc_obs.items():
                 bufs[k][idx] = v                     # write my row in shared memory
             opp_remote.send(idx)                     # tiny signal (few bytes)
@@ -190,13 +171,11 @@ def _worker_main(remote, env_kwargs, net_config, seed, srv=None):
         opponent_fn, set_opp = _server_opponent_factory(net_config, srv["opp"], srv)
     else:                                          # local mode: net runs in-worker
         opponent_fn, set_opp = _policy_opponent_factory(net_config)
-    encoder = None
-    if net_config.get("arch") == "transformer2":          # v2 token encoder for the learner side
-        from rl.encoding import TokenEncoder
-        from rl.card_features import get_card_table
-        encoder = TokenEncoder(get_card_table())
+    from rl.encoding import TokenEncoder                   # token encoder for the learner side
+    from rl.card_features import get_card_table
+    encoder = TokenEncoder(get_card_table())
     env = CabtEnv(seed=seed, opponent_fn=opponent_fn, reward_shaping=reward_shaping,
-                  encoder=encoder, v2=encoder is not None, **env_kwargs)
+                  encoder=encoder, **env_kwargs)
 
     try:
         while True:
@@ -242,14 +221,9 @@ def _ref_spec(net_config, env_kwargs):
     from rl.env import CabtEnv
     from rl.card_features import get_card_table
     ek = dict(env_kwargs); ek.pop("shaping", None)
-    v2 = net_config.get("arch") == "transformer2"
-    if v2:
-        from rl.encoding import TokenEncoder
-        enc = TokenEncoder(get_card_table())
-    else:
-        from rl.encoding import Encoder
-        enc = Encoder(get_card_table())
-    env = CabtEnv(seed=0, encoder=enc, v2=v2, **ek)
+    from rl.encoding import TokenEncoder
+    enc = TokenEncoder(get_card_table())
+    env = CabtEnv(seed=0, encoder=enc, **ek)
     try:
         obs, _ = env.reset()
     finally:
@@ -310,16 +284,10 @@ class SubprocVecEnv:
         import torch
         from rl.card_features import get_card_table
         dev = torch.device(device)
-        if net_config.get("arch") == "transformer2":
-            from rl.encoding import TokenEncoder
-            from rl.policy2 import build_token_net
-            enc = TokenEncoder(get_card_table())
-            net = build_token_net(enc.cards, net_config)
-        else:
-            from rl.encoding import Encoder
-            from rl.policy import build_net
-            enc = Encoder(get_card_table())
-            net = build_net(enc.cf, enc.cards.vocab_size, net_config)
+        from rl.encoding import TokenEncoder
+        from rl.policy2 import build_token_net
+        enc = TokenEncoder(get_card_table())
+        net = build_token_net(enc.cards, net_config)
         self._srv_net = net.to(dev).eval()
         self._srv_dev = dev
         self._srv_lock = threading.Lock()

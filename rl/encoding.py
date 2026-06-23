@@ -61,298 +61,6 @@ def _f(x) -> float:
     return float(x) if x is not None else 0.0
 
 
-class Encoder:
-    """Stateless (given a CardTable) obs -> arrays encoder."""
-
-    def __init__(self, card_table: CardTable | None = None):
-        self.cards = card_table or get_card_table()
-        self.cf = self.cards.feat_dim  # static card feature width
-
-    # ---- public shape description (for building the net / gym spaces) -----
-    @property
-    def shapes(self) -> dict[str, tuple]:
-        cf = self.cf
-        return {
-            "scalars": (14,),
-            "self_player": (10,), "opp_player": (10,),
-            "self_active_dyn": (1, 18), "opp_active_dyn": (1, 18),
-            "self_active_static": (1, cf), "opp_active_static": (1, cf),
-            "self_active_id": (1,), "opp_active_id": (1,),
-            "self_bench_dyn": (N_BENCH, 18), "opp_bench_dyn": (N_BENCH, 18),
-            "self_bench_static": (N_BENCH, cf), "opp_bench_static": (N_BENCH, cf),
-            "self_bench_id": (N_BENCH,), "opp_bench_id": (N_BENCH,),
-            "hand_static": (MAX_HAND, cf), "hand_id": (MAX_HAND,), "hand_mask": (MAX_HAND,),
-            "self_discard_static": (MAX_DISCARD_MLP, cf), "self_discard_id": (MAX_DISCARD_MLP,), "self_discard_mask": (MAX_DISCARD_MLP,),
-            "opp_discard_static": (MAX_DISCARD_MLP, cf), "opp_discard_id": (MAX_DISCARD_MLP,), "opp_discard_mask": (MAX_DISCARD_MLP,),
-            "stadium_static": (cf,), "stadium_id": (1,),
-            "opt_dyn": (MAX_OPTIONS, OPT_DYN),
-            "opt_card_static": (MAX_OPTIONS, cf), "opt_card_id": (MAX_OPTIONS,),
-            "opt_tgt_static": (MAX_OPTIONS, cf), "opt_tgt_id": (MAX_OPTIONS,),
-            "select_type": (1,), "select_context": (1,),
-            "action_mask": (N_ACTIONS,),
-        }
-
-    @property
-    def int_keys(self):
-        return {"self_active_id", "opp_active_id", "self_bench_id", "opp_bench_id",
-                "hand_id", "self_discard_id", "opp_discard_id",
-                "stadium_id", "opt_card_id", "opt_tgt_id", "select_type", "select_context"}
-
-    # ---- helpers ----------------------------------------------------------
-    def _energy_hist(self, energies) -> np.ndarray:
-        v = np.zeros(N_ENERGY, dtype=np.float32)
-        for e in (energies or []):
-            if 0 <= e < N_ENERGY:
-                v[e] += 1.0
-        return v
-
-    def _pokemon(self, pk) -> tuple[np.ndarray, np.ndarray, int]:
-        """-> (dynamic[18], static[cf], card_id). Count features clipped to [0,1]."""
-        if pk is None:
-            return np.zeros(18, np.float32), np.zeros(self.cf, np.float32), 0
-        eh = np.minimum(self._energy_hist(pk.get("energies")) / 10.0, 1.0)
-        maxhp = _f(pk.get("maxHp"))
-        dyn = np.array([
-            1.0,                                              # present
-            _f(pk.get("hp")) / max(maxhp, 1.0),              # hp ratio (<=1)
-            min(maxhp / 400.0, 1.0),
-            *eh,                                              # 11
-            min(len(pk.get("energies") or []) / 10.0, 1.0),
-            min(len(pk.get("tools") or []) / 3.0, 1.0),
-            1.0 if pk.get("appearThisTurn") else 0.0,
-            min(len(pk.get("preEvolution") or []) / 2.0, 1.0),
-        ], dtype=np.float32)
-        cid = pk.get("id") or 0
-        return dyn, self.cards.features(cid), cid
-
-    def _fill(self, seq, n):
-        """seq of Pokemon -> (dyn[n,18], static[n,cf], ids[n])."""
-        dyn = np.zeros((n, 18), np.float32)
-        static = np.zeros((n, self.cf), np.float32)
-        ids = np.zeros(n, np.int64)
-        for i, pk in enumerate(seq[:n]):
-            dyn[i], static[i], ids[i] = self._pokemon(pk)
-        return dyn, static, ids
-
-    def _active(self, pl):
-        return self._fill(list(pl.get("active") or [])[:1], 1)
-
-    def _bench(self, pl):
-        return self._fill(list(pl.get("bench") or []), N_BENCH)
-
-    def _player(self, pl) -> np.ndarray:
-        return np.array([
-            _f(pl.get("handCount")) / _CNT,
-            _f(pl.get("deckCount")) / _DECK,
-            len(pl.get("prize") or []) / _PRIZE,
-            len(pl.get("discard") or []) / _DISCARD,
-            _f(pl.get("benchMax")) / 5.0,
-            1.0 if pl.get("poisoned") else 0.0,
-            1.0 if pl.get("burned") else 0.0,
-            1.0 if pl.get("asleep") else 0.0,
-            1.0 if pl.get("paralyzed") else 0.0,
-            1.0 if pl.get("confused") else 0.0,
-        ], dtype=np.float32)
-
-    def _pile(self, cards, n):
-        """A card pile (hand/discard) -> (static[n,cf], ids[n], mask[n]), per-card."""
-        static = np.zeros((n, self.cf), np.float32)
-        ids = np.zeros(n, np.int64)
-        mask = np.zeros(n, np.float32)
-        for i, c in enumerate((cards or [])[:n]):
-            cid = (c.get("id") if isinstance(c, dict) else c) or 0
-            static[i] = self.cards.features(cid); ids[i] = cid; mask[i] = 1.0
-        return static, ids, mask
-
-    def _attack_feats(self, o: dict) -> list[float]:
-        """ATTACK option -> [base_dmg/350, is_variable, energy_cost/5, has_effect]; zeros otherwise.
-        Variable/conditional damage is FLAGGED (not faked); the engine-sim would_ko feature (a
-        SEPARATE appended column, see _option_row) resolves the realized KO with abilities/stadium/
-        weakness/variable that base_dmg can't."""
-        aid = o.get("attackId")
-        a = _ATTACKS.get(aid) if aid is not None else None
-        if a is None:
-            return [0.0, 0.0, 0.0, 0.0]
-        dmg, var, cost, eff = a
-        return [min(dmg, 350) / 350.0, float(var), min(cost, 5) / 5.0, float(eff)]
-
-    def _option_row(self, o: dict, cid: int) -> tuple[np.ndarray, np.ndarray, int]:
-        """``cid`` is the option's resolved (source) card id (0 if none)."""
-        cid = cid or 0
-        t = np.zeros(N_OPT_TYPES, np.float32)
-        ot = o.get("type", 0)
-        if 0 <= ot < N_OPT_TYPES:
-            t[ot] = 1.0
-        sc = [0.0] * 5                              # special-condition one-hot (poison..confuse)
-        sct = o.get("specialConditionType")
-        if isinstance(sct, int) and 0 <= sct < 5:
-            sc[sct] = 1.0
-        dyn = np.array([
-            *t,                                    # 16  option type (-> opt_verb; dropped from opt_attr)
-            min(_f(o.get("count")) / 5.0, 1.0),    # 2   action params -- the only structural dims kept.
-            min(_f(o.get("number")) / _CNT, 1.0),  #     positions are gathered via opt_src/tgt_pos and
-                                                   #     attack identity via the attack_emb (opt_attack_id),
-                                                   #     so the old positional/flag/attackId scalars are gone.
-            *self._attack_feats(o),                # 4   attack: dmg / variable / cost / effect
-            *sc,                                   # 5   special condition
-            float(o.get("would_ko", 0.0)),         # 1   engine-sim would-KO
-        ], dtype=np.float32)
-        return dyn, self.cards.features(cid), cid
-
-    def _zone_card(self, s, area, index, player, deck_list) -> int:
-        """Card id at (area, index) in `player`'s zone (cabt AreaType). 0 if unresolvable."""
-        if not isinstance(index, int) or index < 0:
-            return 0
-        if area == 1:                                   # DECK (visible via sel['deck'])
-            arr = deck_list
-        elif area == 7:                                 # STADIUM
-            arr = s.get("stadium")
-        elif area == 12:                                # LOOKING
-            arr = s.get("looking")
-        else:
-            zone = {2: "hand", 3: "discard", 4: "active", 5: "bench"}.get(area)
-            players = s.get("players") or []
-            if zone is None or not (0 <= player < len(players)):
-                return 0
-            arr = players[player].get(zone)
-        if not arr or index >= len(arr):
-            return 0
-        c = arr[index]
-        if c is None:
-            return 0
-        return (c.get("id") if isinstance(c, dict) else c) or 0
-
-    def _resolve_card(self, o: dict, s, me, deck_list) -> int:
-        """The SOURCE card an option acts on: explicit cardId, else the card at the
-        option's (area,index) in its owner's zone (hand/deck/discard/active/bench).
-        Previously deck-only -> now any zone, so PLAY/ATTACH/EVOLVE/ABILITY/DISCARD
-        options carry the actual card identity instead of just a positional index.
-
-        PLAY (type 7) options carry ONLY a bare ``index`` (a HAND position) with NO
-        ``area`` field -- without defaulting area to HAND they all resolve to 0, leaving
-        the policy blind to WHICH card it is playing (the most common option type)."""
-        cid = o.get("cardId")
-        if cid is not None:
-            return cid
-        ot = o.get("type")
-        p = o.get("playerIndex")
-        owner = me if p is None else p
-        # TOOL_CARD(4)/ENERGY_CARD(5)/ENERGY(6): area/index point at the HOST Pokemon and
-        # toolIndex/energyIndex select WHICH attached card -> resolve the SELECTED card's identity
-        # ("discard the Double Turbo" vs "discard a basic {F}"). (In the v2 option encoding this
-        # resolved id feeds opt_attr's references-a-card flag; the option's src/tgt tokens come from
-        # opt_src_pos/opt_tgt_pos -- for an effect-driven energy discard, src=effect, tgt=host unit.)
-        if ot in (4, 5, 6):
-            pk = self._zone_pokemon(s, o.get("area"), o.get("index"), owner)
-            if pk is not None:
-                if ot == 4:
-                    sub, j = (pk.get("tools") or []), o.get("toolIndex")
-                else:
-                    sub, j = (pk.get("energyCards") or []), o.get("energyIndex")
-                if isinstance(j, int) and 0 <= j < len(sub):
-                    return _card_id(sub[j])
-            # else fall through to the host-Pokemon id (indices missing/out of range)
-        area = o.get("area")
-        if area is None and ot == 7:              # PLAY: index is a HAND slot (AreaType.HAND==2)
-            area = 2
-        return self._zone_card(s, area, o.get("index"), owner, deck_list)
-
-    def _zone_pokemon(self, s, area, index, player):
-        """The in-play Pokemon dict at (area, index) in ``player``'s board, else None.
-        area 4 == ACTIVE (active[0]); area 5 == BENCH (bench[index])."""
-        players = s.get("players") or []
-        if not (0 <= player < len(players)):
-            return None
-        pl = players[player]
-        if area == 4:
-            act = pl.get("active") or []
-            return act[0] if act else None
-        if area == 5 and isinstance(index, int):
-            bench = pl.get("bench") or []
-            if 0 <= index < len(bench):
-                return bench[index]
-        return None
-
-    def _resolve_target(self, o: dict, s, me) -> int:
-        """The TARGET Pokemon an option affects: the in-play card at
-        (inPlayArea, inPlayIndex) -- e.g. which Pokemon gets the energy / evolves."""
-        p = o.get("playerIndex")
-        return self._zone_card(s, o.get("inPlayArea"), o.get("inPlayIndex"), me if p is None else p, None)
-
-    # ---- main entry -------------------------------------------------------
-    def encode(self, obs: dict, picked: set[int] | None = None) -> dict[str, np.ndarray]:
-        """Encode a cabt observation. ``picked`` = option indices already chosen
-        this decision (for multi-select buffering)."""
-        picked = picked or set()
-        s = obs["current"]
-        me = s["yourIndex"]
-        opp = 1 - me
-        mp, op = s["players"][me], s["players"][opp]
-        sel = obs["select"]
-
-        out: dict[str, np.ndarray] = {}
-
-        # board: active (own vector) + bench (pooled), per side
-        out["self_active_dyn"], out["self_active_static"], out["self_active_id"] = self._active(mp)
-        out["opp_active_dyn"], out["opp_active_static"], out["opp_active_id"] = self._active(op)
-        out["self_bench_dyn"], out["self_bench_static"], out["self_bench_id"] = self._bench(mp)
-        out["opp_bench_dyn"], out["opp_bench_static"], out["opp_bench_id"] = self._bench(op)
-        out["self_player"] = self._player(mp)
-        out["opp_player"] = self._player(op)
-
-        # discard: per-card (identity-aware), both sides public. Own hand per-card too
-        # (opponent hand is hidden -> only handCount, already in the player vec).
-        out["self_discard_static"], out["self_discard_id"], out["self_discard_mask"] = self._pile(mp.get("discard"), MAX_DISCARD_MLP)
-        out["opp_discard_static"], out["opp_discard_id"], out["opp_discard_mask"] = self._pile(op.get("discard"), MAX_DISCARD_MLP)
-        out["hand_static"], out["hand_id"], out["hand_mask"] = self._pile(mp.get("hand"), MAX_HAND)
-
-        # stadium
-        stad = s.get("stadium") or []
-        stad_card = stad[0] if stad else None
-        out["stadium_static"] = self.cards.features(stad_card.get("id") if stad_card else None)
-        out["stadium_id"] = np.array([stad_card.get("id") if stad_card else 0], np.int64)
-
-        # select-context scalars
-        n_opt = len(sel["option"])
-        out["scalars"] = np.array([
-            _f(s.get("turn")) / _T,
-            _f(s.get("turnActionCount")) / 20.0,
-            1.0 if s.get("firstPlayer") == me else 0.0,
-            1.0 if s.get("supporterPlayed") else 0.0,
-            1.0 if s.get("stadiumPlayed") else 0.0,
-            1.0 if s.get("energyAttached") else 0.0,
-            1.0 if s.get("retreated") else 0.0,
-            _f(sel.get("remainDamageCounter")) / 20.0,
-            _f(sel.get("remainEnergyCost")) / 5.0,
-            _f(sel.get("minCount")) / 3.0,
-            _f(sel.get("maxCount")) / 3.0,
-            len(picked) / 3.0,
-            min(n_opt, MAX_OPTIONS) / float(MAX_OPTIONS),
-            1.0 if stad_card else 0.0,
-        ], dtype=np.float32)
-        out["select_type"] = np.array([min(sel.get("type", 0), N_SELECT_TYPES - 1)], np.int64)
-        out["select_context"] = np.array([min(sel.get("context", 0), N_SELECT_CTX - 1)], np.int64)
-
-        # options: resolve each option's SOURCE card (any zone) + TARGET Pokemon, so the
-        # net scores by full content (which card / which target), not a positional index.
-        deck_list = sel.get("deck") if isinstance(sel.get("deck"), list) else None
-        opt_dyn = np.zeros((MAX_OPTIONS, OPT_DYN), np.float32)
-        opt_static = np.zeros((MAX_OPTIONS, self.cf), np.float32)
-        opt_id = np.zeros(MAX_OPTIONS, np.int64)
-        opt_tgt_static = np.zeros((MAX_OPTIONS, self.cf), np.float32)
-        opt_tgt_id = np.zeros(MAX_OPTIONS, np.int64)
-        for i, o in enumerate(sel["option"][:MAX_OPTIONS]):
-            src = self._resolve_card(o, s, me, deck_list)
-            opt_dyn[i], opt_static[i], opt_id[i] = self._option_row(o, src)
-            tgt = self._resolve_target(o, s, me)
-            opt_tgt_static[i], opt_tgt_id[i] = self.cards.features(tgt), tgt
-        out["opt_dyn"], out["opt_card_static"], out["opt_card_id"] = opt_dyn, opt_static, opt_id
-        out["opt_tgt_static"], out["opt_tgt_id"] = opt_tgt_static, opt_tgt_id
-
-        out["action_mask"] = build_mask(sel, picked)
-        return out
-
-
 def build_mask(sel: dict, picked: set[int]) -> np.ndarray:
     """Legal-action mask over [0..MAX_OPTIONS] (last index == submit).
 
@@ -376,12 +84,13 @@ def build_mask(sel: dict, picked: set[int]) -> np.ndarray:
 
 
 # ===========================================================================
-#  v2 TOKEN ENCODER  (merged from the former rl/encoding2.py)
+#  TOKEN ENCODER  (the live encoder; the legacy mlp Encoder was removed)
 #  TokenTransformer's pointer-list encoder + per-game GameTracker/AbilityTracker.
-#  Reuses the v1 Encoder above for its _option_row dynamic features.
+#  Uses the module-level option-resolution helpers above (attack_feats/option_row/
+#  resolve_card/zone_card/zone_pokemon).
 # ===========================================================================
 
-# (v2 token constants + _TOKEN_LAYOUT/_OFF/N_STATE_TOKENS now live in enc_constants.py,
+# (token constants + _TOKEN_LAYOUT/_OFF/N_STATE_TOKENS live in enc_constants.py,
 #  imported at the top of this module.)
 
 
@@ -441,6 +150,118 @@ def _ref_pos(area, index, owner_self) -> int:
     # option's owner_self (stadium-ability options carry playerIndex=None -> owner_self would always
     # pick the self slot even when the OPPONENT owns the stadium). The encode loop resolves it.
     return -1
+
+
+# ===========================================================================
+# Option resolution -- stateless helpers over a cabt observation.
+# (Formerly methods of the v1 Encoder, borrowed by the v2 TokenEncoder via
+#  self._mlp; extracted to module functions so the token encoder stands alone.)
+# ===========================================================================
+def attack_feats(o: dict) -> list[float]:
+    """ATTACK option -> [base_dmg/350, is_variable, energy_cost/5, has_effect]; zeros otherwise.
+    Variable/conditional damage is FLAGGED (not faked); the engine-sim would_ko feature (a
+    SEPARATE appended column, see option_row) resolves the realized KO with abilities/stadium/
+    weakness/variable that base_dmg can't."""
+    aid = o.get("attackId")
+    a = _ATTACKS.get(aid) if aid is not None else None
+    if a is None:
+        return [0.0, 0.0, 0.0, 0.0]
+    dmg, var, cost, eff = a
+    return [min(dmg, 350) / 350.0, float(var), min(cost, 5) / 5.0, float(eff)]
+
+
+def option_row(o: dict, cid: int, cards) -> tuple[np.ndarray, np.ndarray, int]:
+    """``cid`` is the option's resolved (source) card id (0 if none); ``cards`` = the CardTable."""
+    cid = cid or 0
+    t = np.zeros(N_OPT_TYPES, np.float32)
+    ot = o.get("type", 0)
+    if 0 <= ot < N_OPT_TYPES:
+        t[ot] = 1.0
+    sc = [0.0] * 5                              # special-condition one-hot (poison..confuse)
+    sct = o.get("specialConditionType")
+    if isinstance(sct, int) and 0 <= sct < 5:
+        sc[sct] = 1.0
+    dyn = np.array([
+        *t,                                    # 16  option type (-> opt_verb; dropped from opt_attr)
+        min(_f(o.get("count")) / 5.0, 1.0),    # 2   action params -- the only structural dims kept.
+        min(_f(o.get("number")) / _CNT, 1.0),  #     positions are gathered via opt_src/tgt_pos and
+                                               #     attack identity via the attack_emb (opt_attack_id),
+                                               #     so the old positional/flag/attackId scalars are gone.
+        *attack_feats(o),                      # 4   attack: dmg / variable / cost / effect
+        *sc,                                   # 5   special condition
+        float(o.get("would_ko", 0.0)),         # 1   engine-sim would-KO
+    ], dtype=np.float32)
+    return dyn, cards.features(cid), cid
+
+
+def zone_card(s, area, index, player, deck_list) -> int:
+    """Card id at (area, index) in `player`'s zone (cabt AreaType). 0 if unresolvable."""
+    if not isinstance(index, int) or index < 0:
+        return 0
+    if area == 1:                                   # DECK (visible via sel['deck'])
+        arr = deck_list
+    elif area == 7:                                 # STADIUM
+        arr = s.get("stadium")
+    elif area == 12:                                # LOOKING
+        arr = s.get("looking")
+    else:
+        zone = {2: "hand", 3: "discard", 4: "active", 5: "bench"}.get(area)
+        players = s.get("players") or []
+        if zone is None or not (0 <= player < len(players)):
+            return 0
+        arr = players[player].get(zone)
+    if not arr or index >= len(arr):
+        return 0
+    c = arr[index]
+    if c is None:
+        return 0
+    return (c.get("id") if isinstance(c, dict) else c) or 0
+
+
+def zone_pokemon(s, area, index, player):
+    """The in-play Pokemon dict at (area, index) in ``player``'s board, else None.
+    area 4 == ACTIVE (active[0]); area 5 == BENCH (bench[index])."""
+    players = s.get("players") or []
+    if not (0 <= player < len(players)):
+        return None
+    pl = players[player]
+    if area == 4:
+        act = pl.get("active") or []
+        return act[0] if act else None
+    if area == 5 and isinstance(index, int):
+        bench = pl.get("bench") or []
+        if 0 <= index < len(bench):
+            return bench[index]
+    return None
+
+
+def resolve_card(o: dict, s, me, deck_list) -> int:
+    """The SOURCE card an option acts on: explicit cardId, else the card at the option's
+    (area,index) in its owner's zone (hand/deck/discard/active/bench). For TOOL_CARD(4)/
+    ENERGY_CARD(5)/ENERGY(6), area/index point at the HOST Pokemon and toolIndex/energyIndex
+    select WHICH attached card -> resolve the SELECTED card's identity. PLAY (type 7) carries
+    only a bare ``index`` (a HAND slot) with NO ``area`` -> default area=HAND so the policy
+    isn't blind to which card it plays (the most common option type)."""
+    cid = o.get("cardId")
+    if cid is not None:
+        return cid
+    ot = o.get("type")
+    p = o.get("playerIndex")
+    owner = me if p is None else p
+    if ot in (4, 5, 6):
+        pk = zone_pokemon(s, o.get("area"), o.get("index"), owner)
+        if pk is not None:
+            if ot == 4:
+                sub, j = (pk.get("tools") or []), o.get("toolIndex")
+            else:
+                sub, j = (pk.get("energyCards") or []), o.get("energyIndex")
+            if isinstance(j, int) and 0 <= j < len(sub):
+                return _card_id(sub[j])
+        # else fall through to the host-Pokemon id (indices missing/out of range)
+    area = o.get("area")
+    if area is None and ot == 7:              # PLAY: index is a HAND slot (AreaType.HAND==2)
+        area = 2
+    return zone_card(s, area, o.get("index"), owner, deck_list)
 
 
 class GameTracker:
@@ -609,18 +430,14 @@ class AbilityTracker:
 class TokenEncoder:
     """Stateless (given a CardTable) cabt obs -> token-stream numpy arrays.
 
-    ``encode(obs, picked=set())`` mirrors ``encoding.Encoder.encode`` -- it takes
-    the set of option indices already chosen this decision so the action mask is
-    correct for multi-pick selects.
+    ``encode(obs, picked=set())`` takes the set of option indices already chosen
+    this decision so the action mask is correct for multi-pick selects.
     """
 
     def __init__(self, card_table: CardTable | None = None):
         self.cards = card_table or get_card_table()
         self.vocab_size = self.cards.vocab_size
         self.UNK = self.vocab_size          # "unknown card" id (index vocab_size)
-        # Reuse encoding.py's option-feature logic verbatim (type one-hot +
-        # structural + attack feats + special-condition + zone resolution).
-        self._mlp = Encoder(card_table=self.cards)
 
     # ---- public shape description (for obs_to_tensors2 / building the net) --
     @property
@@ -1026,8 +843,8 @@ class TokenEncoder:
         stad_pos = (_OFF["stadium"] + (0 if (isinstance(_stad0, dict) and _stad0.get("playerIndex") == me) else 1)) \
             if isinstance(_stad0, dict) else -1
         for i, o in enumerate(sel["option"][:MAX_OPTIONS]):
-            src_cid = self._mlp._resolve_card(o, s, me, deck_list)
-            opt_attr[i] = self._mlp._option_row(o, src_cid)[0][N_OPT_TYPES:]   # drop verb one-hot
+            src_cid = resolve_card(o, s, me, deck_list)
+            opt_attr[i] = option_row(o, src_cid, self.cards)[0][N_OPT_TYPES:]   # drop verb one-hot
             ot = o.get("type")
             opt_verb[i] = min(int(ot) if isinstance(ot, int) else 0, N_OPT_TYPES - 1)
             aid = o.get("attackId")
@@ -1038,7 +855,7 @@ class TokenEncoder:
                 # MIRROR of ATTACH: src = the Pokemon we remove it FROM (its unit token); tgt = the
                 # SPECIFIC attached card -- it has no sequence token, so carry its id for synthesis.
                 opt_src_pos[i] = _unit_pos(o.get("area"), o.get("index"), owner_self)
-                pk = self._mlp._zone_pokemon(s, o.get("area"), o.get("index"), me if p is None else p)
+                pk = zone_pokemon(s, o.get("area"), o.get("index"), me if p is None else p)
                 if pk is not None:
                     sub = (pk.get("tools") or []) if ot == 4 else (pk.get("energyCards") or [])
                     j = o.get("toolIndex") if ot == 4 else o.get("energyIndex")
