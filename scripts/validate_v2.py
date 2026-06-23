@@ -16,7 +16,7 @@ Exercises the full v2 path against REAL cabt observations:
 Run (from repo root):
     PYTHONPATH=. /c/Users/mgrom/miniconda3/python scripts/validate_v2.py
 
-Touches only rl/encoding2.py + rl/policy2.py (never encoding.py / policy.py).
+Touches only rl/encoding.py + rl/policy2.py (never encoding.py / policy.py).
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from rl.card_features import get_card_table
-from rl.encoding2 import TokenEncoder, MAX_OPTIONS, N_ACTIONS
+from rl.encoding import TokenEncoder, MAX_OPTIONS, N_ACTIONS
 from rl.policy2 import build_token_net, obs_to_tensors2
 
 NEG = -1e9

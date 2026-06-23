@@ -1,4 +1,4 @@
-"""Validate the token-based encoder (rl/encoding2.py) against real cabt obs.
+"""Validate the token-based encoder (rl/encoding.py) against real cabt obs.
 
 Loads notes/vcalib_pool.pkl, encodes every record, and asserts each output array
 matches TokenEncoder.shapes (shape + dtype + id-range + finiteness). Also smoke-
@@ -6,7 +6,7 @@ tests batching through obs_to_tensors2 and a forward pass of policy2.TokenTransf
 when available, so the encoder<->net contract is checked end to end.
 
 Run:
-    PYTHONPATH=. /c/Users/mgrom/miniconda3/python scripts/validate_encoding2.py
+    PYTHONPATH=. /c/Users/mgrom/miniconda3/python scripts/validate_encoding.py
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rl.encoding2 import TokenEncoder  # noqa: E402
+from rl.encoding import TokenEncoder  # noqa: E402
 
 POOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "notes", "vcalib_pool.pkl")

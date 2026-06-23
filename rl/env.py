@@ -25,7 +25,7 @@ import random
 logging.disable(logging.CRITICAL)  # silence kaggle_environments import chatter
 
 from .encoding import Encoder, SUBMIT_ACTION, build_mask
-from .encoding2 import GameTracker, AbilityTracker
+from .encoding import GameTracker, AbilityTracker
 from .card_features import get_card_table
 
 _AGENT_DECK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent", "deck.csv")
@@ -62,6 +62,7 @@ class CabtEnv:
         reward_shaping=None,             # (prev_state, new_state, agent_idx) -> float
         max_steps: int = 4000,
         v2: bool = False,                # v2 token encoder: thread agent deck + a GameTracker
+        would_ko: bool = False,          # v2: annotate engine-simulated would-KO per attack option
         seed: int | None = None,
     ):
         # A pool of decks (each side sampled per episode). Single-deck args are a
@@ -76,6 +77,7 @@ class CabtEnv:
         self.rng = random.Random(seed)
 
         self._v2 = v2
+        self.would_ko = bool(would_ko) and v2             # engine-sim would-KO feature (v2 only)
         # SEPARATE per-side trackers, each fed ONLY that side's own decision obs -- because
         # obs['logs'] is an incremental delta and, at Kaggle inference, an agent only ever
         # receives the obs on its OWN turns (cabt interpreter writes logs to the player about
@@ -108,31 +110,37 @@ class CabtEnv:
         if seed is not None:
             self.rng.seed(seed)
         game = self._engine()
-        self._safe_finish()   # free any prior battle on this (global) engine
+        # Retry until the AGENT actually has a decision: _advance_to_agent plays the
+        # opponent's opening, which can occasionally END the game before the agent ever
+        # acts (deck-out / instant decide). That would leave _done=True and make the next
+        # step() raise "step() after episode end" -> a fresh battle dodges the dead start.
+        for _attempt in range(32):
+            self._safe_finish()   # free any prior battle on this (global) engine
+            self._agent_idx = self.rng.randint(0, 1) if self.randomize_side else 0
+            agent_deck = self.rng.choice(self.agent_decks)      # sample decks this episode
+            self._agent_deck = agent_deck
+            opp_deck = self.rng.choice(self.opponent_decks)
+            self._opp_deck = opp_deck
+            d0 = agent_deck if self._agent_idx == 0 else opp_deck
+            d1 = opp_deck if self._agent_idx == 0 else agent_deck
+            obs, start = game.battle_start(d0, d1)
+            if obs is None:
+                raise RuntimeError(f"battle_start failed: errorPlayer={start.errorPlayer}")
 
-        self._agent_idx = self.rng.randint(0, 1) if self.randomize_side else 0
-        agent_deck = self.rng.choice(self.agent_decks)      # sample decks this episode
-        self._agent_deck = agent_deck
-        opp_deck = self.rng.choice(self.opponent_decks)
-        self._opp_deck = opp_deck
-        d0 = agent_deck if self._agent_idx == 0 else opp_deck
-        d1 = opp_deck if self._agent_idx == 0 else agent_deck
-        obs, start = game.battle_start(d0, d1)
-        if obs is None:
-            raise RuntimeError(f"battle_start failed: errorPlayer={start.errorPlayer}")
-
-        if self._tracker is not None:
-            self._tracker.reset()
-            self._opp_tracker.reset()
-            self._ability.reset()
-            self._opp_ability.reset()
-        self._last_tracked_obs = None
-        self._obs = obs
-        self._picked = []
-        self._steps = 0
-        self._done = False
-        self._result_override = None
-        self._advance_to_agent()
+            if self._tracker is not None:
+                self._tracker.reset()
+                self._opp_tracker.reset()
+                self._ability.reset()
+                self._opp_ability.reset()
+            self._last_tracked_obs = None
+            self._obs = obs
+            self._picked = []
+            self._steps = 0
+            self._done = False
+            self._result_override = None
+            self._advance_to_agent()
+            if not self._done:                  # live state where the agent must act
+                break
         return self._encode(), {"agent_index": self._agent_idx}
 
     def step(self, action: int):
@@ -199,6 +207,9 @@ class CabtEnv:
             # obs the Kaggle submission's agent() receives, so train == test.
             if self._tracker is not None and self._obs is not self._last_tracked_obs:
                 self._tracker.update(self._obs)
+                if self.would_ko:                         # engine-sim KO per attack option (once/decision)
+                    from rl import search_agent2 as _SA2
+                    _SA2.annotate_would_ko(self._obs, self._agent_deck, self.encoder)
                 self._last_tracked_obs = self._obs
             self._ability.note_turn((self._obs["current"] or {}).get("turn"))
             return self.encoder.encode(self._obs, set(self._picked),

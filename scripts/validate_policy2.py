@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch  # noqa: E402
 
 from rl.encoding import MAX_OPTIONS, N_ACTIONS, N_SELECT_TYPES, N_SELECT_CTX  # noqa: E402
-from rl.encoding2 import TokenEncoder  # noqa: E402
+from rl.encoding import TokenEncoder  # noqa: E402
 from rl.policy2 import build_token_net  # noqa: E402
 
 B = 2

@@ -27,12 +27,11 @@ _INT_KEYS = {"self_active_id", "opp_active_id", "self_bench_id", "opp_bench_id",
 
 
 def load_compatible(net, state_dict):
-    """Warm-start: load every parameter whose shape matches; skip the rest (e.g. a
-    layer whose input dim changed across an encoding revision). Returns skipped keys."""
-    own = net.state_dict()
-    keep = {k: v for k, v in state_dict.items() if k in own and v.shape == own[k].shape}
-    net.load_state_dict(keep, strict=False)
-    return sorted(set(own) - set(keep))
+    """STRICT load (the lenient skip/zero-pad warm-start was DROPPED per request). load_state_dict
+    runs with strict=True, so ANY mismatch (missing/extra/shape) RAISES instead of silently
+    dropping or padding layers -- incompatibilities fail loudly. Returns [] (kept for call sites)."""
+    net.load_state_dict(state_dict)
+    return []
 
 
 def obs_to_tensors(obs: dict, device) -> dict:

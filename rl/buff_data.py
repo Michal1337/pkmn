@@ -2,7 +2,7 @@
 
 DEFENSE_BUFF_ATTACKS: attackId -> damage reduction granted to the ATTACKER's own Pokemon
 during the opponent's next turn (200 == "prevent all damage"). Detected from ATTACK logs
-(carry attackId + serial) -> set on that unit's encoding2 unit_attr[23], active the turn after.
+(carry attackId + serial) -> set on that unit's encoding unit_attr[23], active the turn after.
 
 OFFENSE_BUFF_CARDS: Trainer/Item/Stadium cardId -> "this turn" extra attack damage. Detected
 from our own PLAY logs (cardId) -> a CLS scalar. Pokemon ability/attack-based buffs are
