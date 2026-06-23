@@ -47,7 +47,7 @@ def _policy_opponent_factory(net_config):
 
     # token transformer: the env threads the opponent's true deck + shared tracker; no jit (trace is fragile)
     from rl.encoding import TokenEncoder, SUBMIT_ACTION
-    from rl.policy2 import build_token_net
+    from rl.policy import build_token_net
     enc = TokenEncoder(get_card_table())
     state = {"net": None}
 
@@ -285,7 +285,7 @@ class SubprocVecEnv:
         from rl.card_features import get_card_table
         dev = torch.device(device)
         from rl.encoding import TokenEncoder
-        from rl.policy2 import build_token_net
+        from rl.policy import build_token_net
         enc = TokenEncoder(get_card_table())
         net = build_token_net(enc.cards, net_config)
         self._srv_net = net.to(dev).eval()

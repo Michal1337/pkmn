@@ -15,7 +15,7 @@ import torch.nn as nn
 
 from rl.card_features import get_card_table
 from rl.encoding import TokenEncoder
-from rl.policy2 import build_token_net
+from rl.policy import build_token_net
 
 
 def main():

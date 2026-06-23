@@ -2,7 +2,7 @@
 
 Loads notes/vcalib_pool.pkl, encodes every record, and asserts each output array
 matches TokenEncoder.shapes (shape + dtype + id-range + finiteness). Also smoke-
-tests batching through obs_to_tensors2 and a forward pass of policy2.TokenTransformer
+tests batching through obs_to_tensors and a forward pass of policy.TokenTransformer
 when available, so the encoder<->net contract is checked end to end.
 
 Run:
@@ -46,18 +46,18 @@ def main() -> int:
         encoded.append(out)
     print(f"OK: all {len(pool)} records match shapes/dtypes/id-range/finite")
 
-    # net contract (optional: only if torch + policy2 import cleanly)
+    # net contract (optional: only if torch + policy import cleanly)
     try:
         import torch  # noqa: F401
-        from rl.policy2 import build_token_net, obs_to_tensors2
+        from rl.policy import build_token_net, obs_to_tensors
         net = build_token_net(enc.cards, {})
         dev = "cpu"
         # single forward
-        o1 = {k: v[None] for k, v in obs_to_tensors2(encoded[0], dev).items()}
+        o1 = {k: v[None] for k, v in obs_to_tensors(encoded[0], dev).items()}
         logits, value = net.logits_value(o1)
         assert logits.shape[-1] == shapes["action_mask"][0], "logits width != N_ACTIONS"
         # batched forward (stack 3)
-        batch = {k: torch.stack([obs_to_tensors2(e, dev)[k] for e in encoded[:3]])
+        batch = {k: torch.stack([obs_to_tensors(e, dev)[k] for e in encoded[:3]])
                  for k in encoded[0]}
         bl, bv = net.logits_value(batch)
         assert bl.shape[0] == 3 and bv.shape[0] == 3

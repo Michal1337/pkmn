@@ -205,7 +205,7 @@ class CabtEnv:
         if self._obs is not self._last_tracked_obs:
             self._tracker.update(self._obs)
             if self.would_ko:                         # engine-sim KO per attack option (once/decision)
-                from rl import search_agent2 as _SA2
+                from rl import search_agent as _SA2
                 _SA2.annotate_would_ko(self._obs, self._agent_deck, self.encoder)
             self._last_tracked_obs = self._obs
         self._ability.note_turn((self._obs["current"] or {}).get("turn"))

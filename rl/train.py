@@ -33,7 +33,7 @@ except Exception:
 from .encoding import TokenEncoder
 from .env import load_deck
 from .policy import load_compatible
-from .policy2 import build_token_net, obs_to_tensors2
+from .policy import build_token_net, obs_to_tensors
 from .vec_env import SubprocVecEnv
 
 
@@ -173,7 +173,7 @@ def main():
     net_config = {"arch": "transformer2", "emb_dim": args.emb_dim, "d_model": args.d_model,
                   "nhead": args.nhead, "nlayers": args.nlayers, "ff": args.ff,
                   "static": args.static, "would_ko": args.would_ko}
-    to_tensors = obs_to_tensors2
+    to_tensors = obs_to_tensors
 
     pool = resolve_deck_pool(args.decks)
     print(f"[decks] pool='{args.decks}' -> {len(pool)} deck(s); both sides sampled per episode", flush=True)

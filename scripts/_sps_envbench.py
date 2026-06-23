@@ -7,7 +7,7 @@ import numpy as np
 
 def main():
     from rl.vec_env import SubprocVecEnv
-    from rl.policy2 import build_token_net
+    from rl.policy import build_token_net
     from rl.card_features import get_card_table
     import rl.decks_generated as dg
     mode = sys.argv[1]

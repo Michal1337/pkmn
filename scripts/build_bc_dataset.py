@@ -1,7 +1,7 @@
 """Build a behavioral-cloning dataset from PTCG episode replays -> a .npz of stacked
 encoded-obs arrays + action labels (WINNING side only).
 
-Mirrors inference-time encoding EXACTLY (rl.search_agent2._net_greedy_select): per side a
+Mirrors inference-time encoding EXACTLY (rl.search_agent._net_greedy_select): per side a
 GameTracker + AbilityTracker; each decision's recorded action (a list of option indices) is
 expanded into per-pick rows `enc.encode(obs, picked=set(action[:k]), self_deck, tracker, ability_slots)`
 with label=action[k], plus a SUBMIT row (label=SUBMIT_ACTION) when the side submitted before

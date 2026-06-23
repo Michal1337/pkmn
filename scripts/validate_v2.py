@@ -3,7 +3,7 @@
 Exercises the full v2 path against REAL cabt observations:
 
   1. get_card_table("EN_Card_Data.csv") -> TokenEncoder; load notes/vcalib_pool.pkl;
-     encode the first ~6 records' root obs with picked=set(); obs_to_tensors2 +
+     encode the first ~6 records' root obs with picked=set(); obs_to_tensors +
      stack into a batch of 6.
   2. build_token_net(small dims); forward logits_value -> assert
      logits.shape == (6, N_ACTIONS), value.shape == (6,), no NaNs, and that
@@ -16,7 +16,7 @@ Exercises the full v2 path against REAL cabt observations:
 Run (from repo root):
     PYTHONPATH=. /c/Users/mgrom/miniconda3/python scripts/validate_v2.py
 
-Touches only rl/encoding.py + rl/policy2.py (never encoding.py / policy.py).
+Touches only rl/encoding.py + rl/policy.py (never encoding.py / policy.py).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ if _ROOT not in sys.path:
 
 from rl.card_features import get_card_table
 from rl.encoding import TokenEncoder, MAX_OPTIONS, N_ACTIONS
-from rl.policy2 import build_token_net, obs_to_tensors2
+from rl.policy import build_token_net, obs_to_tensors
 
 NEG = -1e9
 B = 6
@@ -76,7 +76,7 @@ def main() -> int:
     print(f"    per-record encode OK ({len(shapes)} streams each)")
 
     dev = torch.device("cpu")
-    tens = [obs_to_tensors2(e, dev) for e in encoded]
+    tens = [obs_to_tensors(e, dev) for e in encoded]
     batch = {k: torch.stack([t[k] for t in tens], dim=0) for k in tens[0]}
     print(f"    batched: action_mask {tuple(batch['action_mask'].shape)}, "
           f"opt_attr {tuple(batch['opt_attr'].shape)}")

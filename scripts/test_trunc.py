@@ -1,6 +1,6 @@
 """Verify + benchmark dynamic sequence truncation for the b=1 opponent forward.
 Run once to save a reference (identical weights + identical encoded obs), edit
-policy2._encode to truncate, run again -> compares logits to ref and times the fwd.
+policy._encode to truncate, run again -> compares logits to ref and times the fwd.
 """
 import os
 import time
@@ -12,7 +12,7 @@ torch.set_num_threads(1)
 
 from rl.card_features import get_card_table
 from rl.encoding import TokenEncoder
-from rl.policy2 import build_token_net
+from rl.policy import build_token_net
 
 REF = "/tmp/trunc_ref.pt"
 OBS = "/tmp/trunc_obs.pt"
@@ -64,4 +64,4 @@ else:
     seq_present = int(sum(int((t[f"{nm}_mask"][0] > 0.5).sum()) for nm in
                           ("hand", "self_discard", "opp_discard") if f"{nm}_mask" in t))
     print(f"BASELINE (full seq): fwd={fwd:.2f} ms   legal_options={n_legal}/128")
-    print("  saved reference; now edit policy2._encode and re-run.")
+    print("  saved reference; now edit policy._encode and re-run.")

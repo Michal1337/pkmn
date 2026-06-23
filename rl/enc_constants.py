@@ -3,7 +3,7 @@
 Two groups: v1 (mlp Encoder) and v2 (TokenEncoder / TokenTransformer). They share several
 names (MAX_HAND, MAX_OPTIONS, N_OPT_TYPES, ...). `MAX_DISCARD_MLP` (v1 window) is intentionally
 distinct from `MAX_DISCARD` (v2 public discard budget) -- do not conflate. Imported by
-rl/encoding.py (which re-exports them) and rl/policy2.py.
+rl/encoding.py (which re-exports them) and rl/policy.py.
 """
 
 # ---- v1 (mlp) + shared shape constants -------------------------------------
@@ -47,7 +47,7 @@ N_STADIUM = 2        # slot0 = self-owned stadium, slot1 = opp-owned (position=o
 
 G = 19               # CLS scalars: 13 board/turn + 5 select-dynamics + 1 our-this-turn offensive buff
 
-# Canonical PRE-ENCODER token order -- MUST match policy2 TokenTransformer._encode's state-token
+# Canonical PRE-ENCODER token order -- MUST match policy TokenTransformer._encode's state-token
 # build order. An option points at the EXACT sequence token of the card/unit it references
 # (gathered by global position), so its src/tgt embedding IS that token, not a rebuilt copy.
 _TOKEN_LAYOUT = [

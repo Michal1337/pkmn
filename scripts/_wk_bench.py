@@ -8,7 +8,7 @@ from sdk_cg import game
 from rl.card_features import get_card_table
 from rl.decks import DECKS
 from rl.encoding import TokenEncoder
-from rl.search_agent2 import would_ko_flags
+from rl.search_agent import would_ko_flags
 
 enc = TokenEncoder(get_card_table())
 deck = [int(c) for c in DECKS["mega_lucario"]]

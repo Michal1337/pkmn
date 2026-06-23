@@ -1,15 +1,15 @@
 """Export a trained checkpoint into a Kaggle submission tarball.
 
 Two backends (both v2 token-transformer; the v1 mlp torch/numpy/mcts backends were removed):
-  --backend transformer2 (default): greedy policy -- bundles policy2.py + the raw
+  --backend transformer2 (default): greedy policy -- bundles policy.py + the raw
       checkpoint (model.pt) and runs torch inference. Requires torch on the runtime.
-  --backend mcts2: decision-time PUCT MCTS (search_agent2) on top of the v2 net --
-      additionally bundles search_agent/search_agent2 + decks + the sdk_cg forward model.
+  --backend mcts2: decision-time PUCT MCTS (search_agent) on top of the v2 net --
+      additionally bundles search_agent/search_agent + decks + the sdk_cg forward model.
 
 Archive top-level contents (flat, as Kaggle requires):
     main.py  deck.csv  EN_Card_Data.csv  card_features.py  enc_constants.py
-    encoding.py  attack_data.py  policy2.py  buff_data.py  model.pt
-    (+ mcts2: search_agent.py  search_agent2.py  decks.py  sdk_cg/)
+    encoding.py  attack_data.py  policy.py  buff_data.py  model.pt
+    (+ mcts2: search_agent.py  search_agent.py  decks.py  sdk_cg/)
 
     python scripts/export_rl_submission.py --ckpt path/to/latest.pt                 # transformer2 (greedy)
     python scripts/export_rl_submission.py --ckpt path/to/latest.pt --backend mcts2 # + MCTS
@@ -51,7 +51,7 @@ import torch
 from card_features import get_card_table
 from encoding import SUBMIT_ACTION
 from encoding import TokenEncoder, GameTracker, AbilityTracker
-from policy2 import build_token_net
+from policy import build_token_net
 
 _DEVICE = torch.device("cpu")
 _CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
@@ -64,7 +64,7 @@ _NET.eval()
 # would_ko column is populated exactly as in training (train==test). Else it would read all-zero.
 _WK_ON = bool(_CK.get("net_config", {}).get("would_ko"))
 if _WK_ON:
-    import search_agent2 as _SA2
+    import search_agent as _SA2
 
 # our true 60-card decklist (threaded as self_deck) + per-game reveal/ability memory.
 with open(os.path.join(_agent_dir(), "deck.csv")) as f:
@@ -113,8 +113,8 @@ import random
 import torch
 from card_features import get_card_table
 from encoding import TokenEncoder, GameTracker, AbilityTracker
-from policy2 import build_token_net
-import search_agent2 as SA2
+from policy import build_token_net
+import search_agent as SA2
 
 _CARDS = get_card_table(os.path.join(_agent_dir(), "EN_Card_Data.csv"))
 _ENC = TokenEncoder(_CARDS)
@@ -154,7 +154,7 @@ def copy_module(src_name, dst_path):
     with open(os.path.join(RL, src_name), encoding="utf-8") as f:
         code = f.read()
     for m in ("card_features", "enc_constants", "encoding", "attack_data", "buff_data",
-              "policy2", "search_agent", "search_agent2", "decks"):
+              "policy", "search_agent", "decks"):
         code = code.replace(f"from .{m} import", f"from {m} import")
     with open(dst_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -187,7 +187,7 @@ def main():
     copy_module("encoding.py", os.path.join(b, "encoding.py"))
     copy_module("attack_data.py", os.path.join(b, "attack_data.py"))
     copy_module("buff_data.py", os.path.join(b, "buff_data.py"))
-    copy_module("policy2.py", os.path.join(b, "policy2.py"))
+    copy_module("policy.py", os.path.join(b, "policy.py"))
     torch.save(ck, os.path.join(b, "model.pt"))
     shutil.copy(args.deck, os.path.join(b, "deck.csv"))
     shutil.copy(args.csv, os.path.join(b, "EN_Card_Data.csv"))
@@ -195,11 +195,10 @@ def main():
     wk = bool(ck.get("net_config", {}).get("would_ko"))   # net trained with would_ko -> needs the engine-sim at inference
 
     def _bundle_engine_sim():
-        # search_agent2 (MCTS + would_ko) reuses _determinize/_branchable/_Node from search_agent
-        # (net-agnostic primitives); bundle both + the candidate decklists + the sdk_cg forward model.
+        # search_agent now holds both the net-agnostic primitives AND the decision-time MCTS +
+        # would_ko sim; bundle it + the candidate decklists + the sdk_cg forward model.
         copy_module("decks.py", os.path.join(b, "decks.py"))
         copy_module("search_agent.py", os.path.join(b, "search_agent.py"))
-        copy_module("search_agent2.py", os.path.join(b, "search_agent2.py"))
         shutil.copytree(os.path.join(ROOT, "sdk_cg"), os.path.join(b, "sdk_cg"),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 

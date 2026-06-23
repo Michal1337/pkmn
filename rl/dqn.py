@@ -36,7 +36,7 @@ import torch.optim as optim
 from .vec_env import SubprocVecEnv
 from .card_features import get_card_table
 from .encoding import TokenEncoder
-from .policy2 import build_token_net, obs_to_tensors2
+from .policy import build_token_net, obs_to_tensors
 from .train import resolve_deck_pool
 
 
@@ -187,7 +187,7 @@ def main():
         eps = max(a.eps_end, a.eps_start - (a.eps_start - a.eps_end) * global_step / anneal)
 
         with torch.no_grad():
-            q = dueling_q(net, obs_to_tensors2(next_obs_np, device))
+            q = dueling_q(net, obs_to_tensors(next_obs_np, device))
         greedy = q.argmax(1).cpu().numpy()
         qmag.append(float(q.masked_fill(q < -1e8, float("nan")).abs().nanmean()))
         mask = next_obs_np["action_mask"]

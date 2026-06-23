@@ -1,6 +1,6 @@
-"""AlphaZero for the v2 token-transformer (encoding/policy2) — the v2 counterpart of az.py.
+"""AlphaZero for the v2 token-transformer (encoding/policy) — the v2 counterpart of az.py.
 
-MCTS self-play via search_agent2.mcts_policy: BOTH players move by MCTS; we record
+MCTS self-play via search_agent.mcts_policy: BOTH players move by MCTS; we record
 (encoded state, MCTS visit distribution pi, outcome z) at each searchable decision and train
 the net so its policy matches pi (CE) and its value matches z (MSE). This trains the value
 head ON THE SEARCH-PLAY DISTRIBUTION — the proper fix that the one-shot frozen-trunk value
@@ -11,8 +11,8 @@ recorded training state is encoded the same way the live agent encodes -> train 
 Self-play is CPU-heavy (MCTS + engine), so it runs in subprocess workers (one SDK sim each).
 Warm-start from a PPO v2 checkpoint via --init-from.
 
-    python -m rl.az2 --workers 24 --games-per-iter 192 --iters 60 --n-sims 64 \
-        --init-from $HOME/pkmn_runs/v2_baseline/ckpt_5505024.pt --out $HOME/pkmn_runs/az2
+    python -m rl.az --workers 24 --games-per-iter 192 --iters 60 --n-sims 64 \
+        --init-from $HOME/pkmn_runs/v2_baseline/ckpt_5505024.pt --out $HOME/pkmn_runs/az
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _selfplay_game(net, enc, deck_pool, n_sims, n_det, rng):
     own trackers (fed only its own decision obs). Returns [(enc_obs, pi, player)]."""
     from sdk_cg.game import battle_start, battle_select, battle_finish
     from .encoding import GameTracker, AbilityTracker
-    from .search_agent2 import mcts_policy
+    from .search_agent import mcts_policy
     try:
         battle_finish()
     except Exception:
@@ -67,7 +67,7 @@ def _worker(remote, parent_remote, net_config, deck_pool, n_sims, n_det, seed):
     T.set_num_threads(1)
     from .card_features import get_card_table
     from .encoding import TokenEncoder
-    from .policy2 import build_token_net
+    from .policy import build_token_net
     enc = TokenEncoder(get_card_table())
     net = build_token_net(enc.cards, net_config); net.eval()      # no jit: transformer doesn't trace cleanly
     rng = random.Random(seed)
@@ -111,7 +111,7 @@ def parse_args():
     p.add_argument("--static", action="store_true",
                    help="static per-card features (MUST match the --init-from net, e.g. the abomS specialist)")
     p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--out", type=str, default=os.path.join(os.environ.get("HOME", "."), "pkmn_runs", "az2"))
+    p.add_argument("--out", type=str, default=os.path.join(os.environ.get("HOME", "."), "pkmn_runs", "az"))
     return p.parse_args()
 
 
@@ -130,7 +130,7 @@ def main():
         GENERATED = {}
     from .encoding import TokenEncoder
     from .env import load_deck
-    from .policy2 import build_token_net
+    from .policy import build_token_net
     from .policy import load_compatible
     ct = get_card_table(); enc = TokenEncoder(ct)
 

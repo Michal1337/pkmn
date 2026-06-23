@@ -440,7 +440,7 @@ class TokenEncoder:
         self.vocab_size = self.cards.vocab_size
         self.UNK = self.vocab_size          # "unknown card" id (index vocab_size)
 
-    # ---- public shape description (for obs_to_tensors2 / building the net) --
+    # ---- public shape description (for obs_to_tensors / building the net) --
     @property
     def shapes(self) -> dict[str, tuple]:
         return {
@@ -579,7 +579,7 @@ class TokenEncoder:
         n_energy = float(len(pk.get("energies") or []))
 
         attr[0] = (hp / maxhp) if maxhp > 0 else 0.0          # hp / maxHp
-        attr[1] = maxhp / 500.0                                # effective in-play maxHp /500 (tool-boostable; base printed maxHp is a static feature in policy2)
+        attr[1] = maxhp / 500.0                                # effective in-play maxHp /500 (tool-boostable; base printed maxHp is a static feature in policy)
         attr[2:2 + N_ENERGY_BINS] = np.minimum(eh / 4.0, 1.0)  # 12-bin energy hist /4, clipped (was /8 -> wasted range)
         attr[14] = n_energy / 12.0                             # total energy / 12
         # status one-hot (ACTIVE only): poisoned,burned,asleep,paralyzed,confused

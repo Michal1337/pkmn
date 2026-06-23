@@ -2,7 +2,7 @@
 sizes + the deck-token-cut benefit on the b=1 (inference/truncation) path. (encode is CPU ~0.56ms.)"""
 import time, torch, numpy as np
 from rl.encoding import TokenEncoder
-from rl.policy2 import build_token_net
+from rl.policy import build_token_net
 from rl.card_features import get_card_table
 
 dev = "cuda" if torch.cuda.is_available() else "cpu"

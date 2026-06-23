@@ -1,4 +1,4 @@
-"""Validate the token-based net (rl/policy2.TokenTransformer) on a SYNTHETIC batch.
+"""Validate the token-based net (rl/policy.TokenTransformer) on a SYNTHETIC batch.
 
 Builds a small TokenTransformer and forwards a batch (B=2) of tensors whose shapes
 EXACTLY match TokenEncoder.shapes -- no real obs / pickle needed, so this is a pure
@@ -10,7 +10,7 @@ net<->encoder-contract check. Asserts the full interface:
   * every sampled action is legal.
 
 Run:
-    PYTHONPATH=. /c/Users/mgrom/miniconda3/python scripts/validate_policy2.py
+    PYTHONPATH=. /c/Users/mgrom/miniconda3/python scripts/validate_policy.py
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import torch  # noqa: E402
 
 from rl.encoding import MAX_OPTIONS, N_ACTIONS, N_SELECT_TYPES, N_SELECT_CTX  # noqa: E402
 from rl.encoding import TokenEncoder  # noqa: E402
-from rl.policy2 import build_token_net  # noqa: E402
+from rl.policy import build_token_net  # noqa: E402
 
 B = 2
 DEV = "cpu"

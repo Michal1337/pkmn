@@ -19,7 +19,7 @@ torch.set_grad_enabled(False)
 
 from rl.card_features import get_card_table
 from rl.encoding import TokenEncoder
-from rl.policy2 import build_token_net
+from rl.policy import build_token_net
 from rl.vec_env import SubprocVecEnv
 import rl.decks_generated as dg
 
@@ -88,7 +88,7 @@ def selfplay_sps(num_envs, opp_weights, steps=100, warmup=15, mode="local", serv
 
 
 if __name__ == "__main__":
-    from rl.policy2 import _TRUNC_B1
+    from rl.policy import _TRUNC_B1
     envs = [int(x) for x in sys.argv[1:]] or [8, 16, 24, 32]
     print(f"cpu_count: {os.cpu_count()}   b1_truncation={'ON' if _TRUNC_B1 else 'OFF (baseline)'}", flush=True)
     sd = single_forward_bench()

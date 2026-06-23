@@ -134,9 +134,9 @@ def make_ai(ckpt, mode, n_sims, n_det, deck_holder):
         raise SystemExit(f"checkpoint arch {arch!r} unsupported -- the v1 mlp/transformer nets were "
                          f"removed; use a transformer2 checkpoint")
     from rl.encoding import TokenEncoder, GameTracker, AbilityTracker
-    from rl.policy2 import build_token_net
+    from rl.policy import build_token_net
     from rl.policy import load_compatible
-    from rl import search_agent2 as SA
+    from rl import search_agent as SA
     enc = TokenEncoder(cards)
     net = build_token_net(cards, ck["net_config"]); load_compatible(net, ck["net"]); net.eval()
     tr, ab = GameTracker(), AbilityTracker()

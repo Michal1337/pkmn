@@ -1,4 +1,4 @@
-"""Audit the v2 (encoding/policy2) encoding + action space on REAL battle obs.
+"""Audit the v2 (encoding/policy) encoding + action space on REAL battle obs.
 
 Plays greedy self-play games (dual per-side trackers, as in training/inference) and at
 EVERY decision checks a battery of invariants, accumulating any violations. Targets both
@@ -21,8 +21,8 @@ torch.set_grad_enabled(False)
 from rl.card_features import get_card_table
 from rl.encoding import build_mask, SUBMIT_ACTION, MAX_OPTIONS, N_ACTIONS
 from rl.encoding import TokenEncoder, GameTracker, AbilityTracker, N_BENCH, MAX_HAND, UNIT_ATTR, _card_id
-from rl.policy2 import build_token_net
-from rl import search_agent2 as SA2
+from rl.policy import build_token_net
+from rl import search_agent as SA2
 from rl.decks import DECKS
 try:
     from rl.decks_generated import GENERATED

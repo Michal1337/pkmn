@@ -1,4 +1,4 @@
-"""Head-to-head: a v2 TokenTransformer (encoding/policy2) vs the OLD champion bundle.
+"""Head-to-head: a v2 TokenTransformer (encoding/policy) vs the OLD champion bundle.
 The v2 agent pilots with its true deck + GameTracker + AbilityTracker (matches the
 submission's inference). Both sides greedy; same deck per matchup; alternate sides.
 
@@ -21,7 +21,7 @@ def _v2_agent(ckpt_path, deck_holder):
     from rl.card_features import get_card_table
     from rl.encoding import build_mask, SUBMIT_ACTION
     from rl.encoding import TokenEncoder, GameTracker, AbilityTracker
-    from rl.policy2 import build_token_net
+    from rl.policy import build_token_net
     cards = get_card_table("EN_Card_Data.csv")
     enc = TokenEncoder(cards)
     ck = torch.load(ckpt_path, map_location="cpu")
