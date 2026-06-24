@@ -46,9 +46,9 @@ def _policy_opponent_factory(net_config):
     torch.set_num_threads(1)
 
     # token transformer: the env threads the opponent's true deck + shared tracker; no jit (trace is fragile)
-    from rl.encoding import TokenEncoder, SUBMIT_ACTION
-    from rl.policy import build_token_net
-    enc = TokenEncoder(get_card_table())
+    from rl.encoding import SUBMIT_ACTION
+    from rl.encoding_fx import encoder_for, build_net_for
+    enc = encoder_for(net_config, get_card_table())
     state = {"net": None}
 
     def set_weights(sd):
@@ -56,7 +56,7 @@ def _policy_opponent_factory(net_config):
             state["net"] = None
             return
         sd = {k: torch.as_tensor(v) for k, v in sd.items()}   # numpy (from the pipe) -> tensors
-        net = build_token_net(enc.cards, net_config)
+        net = build_net_for(net_config, enc.cards)
         net.load_state_dict(sd); net.eval()
         state["net"] = net                           # raw net (transformer doesn't jit-freeze cleanly)
 
@@ -105,8 +105,9 @@ def _server_opponent_factory(net_config, opp_remote, srv):
     from rl.card_features import get_card_table
     torch.set_num_threads(1)
 
-    from rl.encoding import TokenEncoder, SUBMIT_ACTION
-    enc = TokenEncoder(get_card_table())
+    from rl.encoding import SUBMIT_ACTION
+    from rl.encoding_fx import encoder_for, build_net_for
+    enc = encoder_for(net_config, get_card_table())
 
     idx, n = srv["idx"], srv["n"]
     shms = {k: _attach_shm(name) for k, name in srv["names"].items()}
@@ -171,9 +172,9 @@ def _worker_main(remote, env_kwargs, net_config, seed, srv=None):
         opponent_fn, set_opp = _server_opponent_factory(net_config, srv["opp"], srv)
     else:                                          # local mode: net runs in-worker
         opponent_fn, set_opp = _policy_opponent_factory(net_config)
-    from rl.encoding import TokenEncoder                   # token encoder for the learner side
+    from rl.encoding_fx import encoder_for                 # arch dispatch (base vs transformer2_fx)
     from rl.card_features import get_card_table
-    encoder = TokenEncoder(get_card_table())
+    encoder = encoder_for(net_config, get_card_table())
     env = CabtEnv(seed=seed, opponent_fn=opponent_fn, reward_shaping=reward_shaping,
                   encoder=encoder, **env_kwargs)
 
@@ -221,8 +222,8 @@ def _ref_spec(net_config, env_kwargs):
     from rl.env import CabtEnv
     from rl.card_features import get_card_table
     ek = dict(env_kwargs); ek.pop("shaping", None)
-    from rl.encoding import TokenEncoder
-    enc = TokenEncoder(get_card_table())
+    from rl.encoding_fx import encoder_for, build_net_for
+    enc = encoder_for(net_config, get_card_table())
     env = CabtEnv(seed=0, encoder=enc, **ek)
     try:
         obs, _ = env.reset()
@@ -284,10 +285,9 @@ class SubprocVecEnv:
         import torch
         from rl.card_features import get_card_table
         dev = torch.device(device)
-        from rl.encoding import TokenEncoder
-        from rl.policy import build_token_net
-        enc = TokenEncoder(get_card_table())
-        net = build_token_net(enc.cards, net_config)
+        from rl.encoding_fx import encoder_for, build_net_for
+        enc = encoder_for(net_config, get_card_table())
+        net = build_net_for(net_config, enc.cards)
         self._srv_net = net.to(dev).eval()
         self._srv_dev = dev
         self._srv_lock = threading.Lock()

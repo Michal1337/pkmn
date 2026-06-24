@@ -31,6 +31,7 @@ try:
 except Exception:
     GENERATED = {}
 from .encoding import TokenEncoder
+from .encoding_fx import encoder_for, build_net_for     # arch dispatch: base transformer2 OR transformer2_fx
 from .env import load_deck
 from .policy import load_compatible
 from .policy import build_token_net, obs_to_tensors
@@ -97,7 +98,7 @@ def parse_args():
                         "or a named deck from rl.decks (e.g. mega_abomasnow)")
     p.add_argument("--no-randomize-side", action="store_true")
     # net (architecture)
-    p.add_argument("--arch", choices=["transformer2"], default="transformer2")  # v1 mlp/transformer removed
+    p.add_argument("--arch", choices=["transformer2", "transformer2_fx"], default="transformer2")  # _fx = effect-feature fork
     p.add_argument("--static", action="store_true", help="transformer2: feed static per-card features (HP/type/cost/...) into the net")
     p.add_argument("--would-ko", action=argparse.BooleanOptionalAction, default=True,
                    help="transformer2: annotate engine-simulated would-KO per attack option (DEFAULT ON; "
@@ -169,10 +170,10 @@ def main():
     np.random.seed(args.seed + rank)
 
     ct = get_card_table()
-    enc = TokenEncoder(ct)
-    net_config = {"arch": "transformer2", "emb_dim": args.emb_dim, "d_model": args.d_model,
+    net_config = {"arch": args.arch, "emb_dim": args.emb_dim, "d_model": args.d_model,
                   "nhead": args.nhead, "nlayers": args.nlayers, "ff": args.ff,
                   "static": args.static, "would_ko": args.would_ko}
+    enc = encoder_for(net_config, ct)        # TokenEncoderFX for transformer2_fx, else base TokenEncoder
     to_tensors = obs_to_tensors
 
     pool = resolve_deck_pool(args.decks)
@@ -190,7 +191,7 @@ def main():
     envs = SubprocVecEnv(args.num_envs, env_kwargs, net_config, base_seed=args.seed * 1000,
                          server_device=srv_dev, opponent_mode=args.opponent_mode)
 
-    net = build_token_net(ct, net_config).to(device)
+    net = build_net_for(net_config, ct).to(device)
     if ddp:                                              # identical initial weights across ranks
         for p in net.parameters():
             dist.broadcast(p.data, src=0)
@@ -342,7 +343,7 @@ def main():
     behavior_net = None
     if args.async_collect:
         # frozen behavior-policy clone for the background collector (no race with the optimizer)
-        behavior_net = build_token_net(ct, net_config).to(collector_device)
+        behavior_net = build_net_for(net_config, ct).to(collector_device)
         behavior_net.load_state_dict(net.state_dict())
         behavior_net.eval()
         if is_main:

@@ -109,7 +109,7 @@ class TokenTransformer(nn.Module):
 
     def __init__(self, vocab_size: int, emb_dim: int = 48, d_model: int = 128,
                  nhead: int = 4, nlayers: int = 2, dropout: float = 0.0,
-                 card_feat=None, structured: bool = False):
+                 card_feat=None, structured: bool = False, opt_struct: int = OPT_STRUCT):
         super().__init__()
         self.d = d_model
         self.UNK = vocab_size                                  # hidden-card id index
@@ -154,7 +154,7 @@ class TokenTransformer(nn.Module):
         # for board refs, the full unit state; opt_attr carries the per-option structural distinctions.
         self.opt_src_proj = nn.Linear(d_model, d_model)
         self.opt_tgt_proj = nn.Linear(d_model, d_model)
-        self.opt_attr_proj = nn.Linear(OPT_STRUCT, d_model)    # option structural feats (no verb one-hot)
+        self.opt_attr_proj = nn.Linear(opt_struct, d_model)    # option structural feats (no verb one-hot); opt_struct>OPT_STRUCT in the fx fork
         self.opt_verb_emb = nn.Embedding(N_OPT_TYPES, d_model)  # OptionType (verb) -> its own learned vector
         self.attack_emb = nn.Embedding(MAX_ATTACK, d_model, padding_idx=0)  # attackId -> learned identity (0=no-attack, zero)
         # (the acting/acted-on Pokemon's state now enters each option as that unit's FULL token,
@@ -334,8 +334,10 @@ def build_token_net(card_table: CardTable, net_config: dict | None = None) -> To
     use_static = cfg.pop("static", False)                  # opt-in static card features; old ckpts have no key -> OFF (load-compatible)
     use_structured = cfg.pop("structured", False)          # opt-in verb-conditioned action head
     cfg.pop("would_ko", None)                              # metadata flag (env/inference annotate); not a net arg
+    opt_struct = cfg.pop("opt_struct", OPT_STRUCT)         # widened in the transformer2_fx fork (+ effect multi-hot)
     feat = card_table.matrix if use_static else None
-    return TokenTransformer(card_table.vocab_size, card_feat=feat, structured=use_structured, **cfg)
+    return TokenTransformer(card_table.vocab_size, card_feat=feat, structured=use_structured,
+                            opt_struct=opt_struct, **cfg)
 
 
 if __name__ == "__main__":
